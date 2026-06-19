@@ -1,0 +1,20 @@
+# Everything the developer needs in addition to the production requirements
+-r prod.txt
+
+# Testing
+pytest==9.0.2
+pytest-cov==7.0.0
+WebTest==3.0.7
+requests-mock==1.12.1
+pytest-mock==3.15.1
+
+# Lint and code style
+black==26.1.0
+flake8-blind-except==0.2.1
+flake8-debugger==4.1.2
+flake8-docstrings==1.7.0
+flake8-isort==7.0.0
+Flake8-pyproject==1.2.4
+flake8==7.3.0
+isort==8.0.0
+pep8-naming==0.15.1

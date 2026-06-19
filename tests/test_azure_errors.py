@@ -1,0 +1,123 @@
+"""Functional tests using WebTest.
+
+See: http://webtest.readthedocs.org/
+"""
+
+from .replay_base import ReplyBase
+
+
+class TestError400(ReplyBase):
+    """Test a single ping-pong interaction, no tool calls."""
+
+    upstream_status_code = 400
+    expected_downstream_status_code = 400
+    upstream_response_body = b'{"foo": "bar"}'
+    expected_downstream_response_body = b"""
+Check "azure_response" for the error details:
+\t{
+\t    "endpoint": "https://t***e.openai.azure.com/openai/v1/responses",
+\t    "azure_status_code": 400,
+\t    "azure_response": {
+\t        "foo": "bar"
+\t    },
+\t    "request_body": {
+\t        "instructions": "REDACTED...",
+\t        "input": "...redacted 2 input items...",
+\t        "model": "gpt-5",
+\t        "tools": "...redacted 11 tools...",
+\t        "tool_choice": "auto",
+\t        "stream": true,
+\t        "reasoning": {
+\t            "effort": "minimal",
+\t            "summary": "detailed"
+\t        },
+\t        "store": true,
+\t        "parallel_tool_calls": true,
+\t        "stream_options": {
+\t            "include_obfuscation": false
+\t        },
+\t        "prompt_cache_key": "no ***key"
+\t    }
+\t}
+If the issue persists, report it with the details above."""
+
+
+class TestError401(ReplyBase):
+    """Test a single ping-pong interaction, no tool calls."""
+
+    upstream_status_code = 401
+    expected_downstream_status_code = 400
+    upstream_response_body = b'{"error": "Bad API Key or whatever"}'
+    expected_downstream_response_body = b"""
+Check "azure_response" for the error details:
+\t{
+\t    "endpoint": "https://t***e.openai.azure.com/openai/v1/responses",
+\t    "azure_status_code": 401,
+\t    "azure_response": {
+\t        "error": "Bad API Key or whatever"
+\t    },
+\t    "request_body": {
+\t        "instructions": "REDACTED...",
+\t        "input": "...redacted 2 input items...",
+\t        "model": "gpt-5",
+\t        "tools": "...redacted 11 tools...",
+\t        "tool_choice": "auto",
+\t        "stream": true,
+\t        "reasoning": {
+\t            "effort": "minimal",
+\t            "summary": "detailed"
+\t        },
+\t        "store": true,
+\t        "parallel_tool_calls": true,
+\t        "stream_options": {
+\t            "include_obfuscation": false
+\t        },
+\t        "prompt_cache_key": "no ***key"
+\t    }
+\t}
+If the issue persists, report it with the details above."""
+
+
+class TestError500(ReplyBase):
+    """Test an error response where the response body is not json."""
+
+    upstream_status_code = 500
+    expected_downstream_status_code = 500
+    upstream_response_body = b"Internal Server Error"
+    expected_downstream_response_body = b"""
+Check "azure_response" for the error details:
+\t{
+\t    "endpoint": "https://t***e.openai.azure.com/openai/v1/responses",
+\t    "azure_status_code": 500,
+\t    "azure_response": "Internal Server Error",
+\t    "request_body": {
+\t        "instructions": "REDACTED...",
+\t        "input": "...redacted 2 input items...",
+\t        "model": "gpt-5",
+\t        "tools": "...redacted 11 tools...",
+\t        "tool_choice": "auto",
+\t        "stream": true,
+\t        "reasoning": {
+\t            "effort": "minimal",
+\t            "summary": "detailed"
+\t        },
+\t        "store": true,
+\t        "parallel_tool_calls": true,
+\t        "stream_options": {
+\t            "include_obfuscation": false
+\t        },
+\t        "prompt_cache_key": "no ***key"
+\t    }
+\t}
+If the issue persists, report it with the details above."""
+
+
+class TestCompletionError(ReplyBase):
+    """Test a successful HTTP request but with a streamed response.error event."""
+
+    def modify_settings(self, app) -> None:
+        """Set gpt-5.1-codex model and auto truncation, which is currently causing this issue."""
+        app.config["AZURE_MODEL_DEPLOYMENTS"]["gpt-5"] = "gpt-5.1-codex"
+        app.config["AZURE_TRUNCATION"] = "auto"
+
+    recording = "response_error"
