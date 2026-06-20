@@ -167,12 +167,12 @@ def test_codex_auth_manager_refreshes_expired_token(tmp_path, monkeypatch):
                 "refresh_token": "new-refresh",
             }
 
-    def fake_post(url, headers, json, timeout):
+    def fake_post(url, headers, data, timeout):
         captured.update(
             {
                 "url": url,
                 "headers": headers,
-                "json": json,
+                "data": data,
                 "timeout": timeout,
             }
         )
@@ -186,7 +186,7 @@ def test_codex_auth_manager_refreshes_expired_token(tmp_path, monkeypatch):
     raw = json.loads(auth_file.read_text())
 
     assert captured["url"] == REFRESH_URL
-    assert captured["json"]["refresh_token"] == "old-refresh"
+    assert captured["data"]["refresh_token"] == "old-refresh"
     assert state.refresh_token == "new-refresh"
     assert raw["custom_field"] == "keep-me"
     assert raw["last_refresh"]

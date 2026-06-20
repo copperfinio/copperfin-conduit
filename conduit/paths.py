@@ -24,6 +24,11 @@ def auth_path(home: Path | None = None) -> Path:
     return (home or conduit_home()) / "auth.json"
 
 
+def anthropic_auth_path(home: Path | None = None) -> Path:
+    """Return the Conduit Anthropic auth-state path."""
+    return (home or conduit_home()) / "anthropic_auth.json"
+
+
 def logs_dir(home: Path | None = None) -> Path:
     """Return the Conduit log directory."""
     return (home or conduit_home()) / "logs"

@@ -18,6 +18,7 @@ import click
 import requests
 
 from . import __version__
+from . import anthropic_auth
 from .auth import (
     ConduitAuthError,
     auth_status,
@@ -31,6 +32,7 @@ from .auth import (
 )
 from .envfile import apply_env, ensure_env_file, load_env, service_key
 from .paths import (
+    anthropic_auth_path,
     auth_path,
     conduit_home,
     ensure_conduit_home,
@@ -40,6 +42,8 @@ from .paths import (
 )
 from .service import install_service, service_status, uninstall_service
 from .smoke import run_smoke
+
+AUTH_PROVIDER_CHOICE = click.Choice(["codex", "anthropic", "claude"])
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -56,16 +60,24 @@ def init(force: bool) -> None:
     env_file = ensure_env_file(force=force, home=home)
     click.echo(f"Conduit home: {home}")
     click.echo(f"Config:       {env_file}")
-    click.echo(f"Auth path:    {auth_path(home)}")
+    click.echo(f"Codex auth:   {auth_path(home)}")
+    click.echo(f"Claude auth:  {anthropic_auth_path(home)}")
     click.echo(f"API key:      {service_key(home=home)}")
 
 
 @cli.group()
 def auth() -> None:
-    """Manage ChatGPT/Codex subscription auth."""
+    """Manage subscription auth."""
 
 
 @auth.command("login")
+@click.option(
+    "--provider",
+    type=AUTH_PROVIDER_CHOICE,
+    default="codex",
+    show_default=True,
+    help="Subscription provider to authenticate.",
+)
 @click.option(
     "--method",
     type=click.Choice(["browser", "device"]),
@@ -74,10 +86,22 @@ def auth() -> None:
     help="OAuth login method.",
 )
 @click.option("--no-browser", is_flag=True, help="Do not open a browser automatically.")
-def auth_login(method: str, no_browser: bool) -> None:
-    """Authenticate Conduit to a ChatGPT/Codex subscription."""
+def auth_login(provider: str, method: str, no_browser: bool) -> None:
+    """Authenticate Conduit to a subscription provider."""
     ensure_env_file()
+    normalized = normalize_auth_provider(provider)
     try:
+        if normalized == "anthropic":
+            if method == "device":
+                raise ConduitAuthError(
+                    "Anthropic OAuth does not provide a device-code flow here. "
+                    "Use --method browser."
+                )
+            token = anthropic_auth.login_browser(open_browser=not no_browser)
+            click.echo("Authenticated.")
+            click.echo(f"Expires: {format_epoch_ms(token.expires)}")
+            click.echo(f"Saved:   {anthropic_auth_path()}")
+            return
         if method == "device":
             credentials = login_device(open_browser=not no_browser)
         else:
@@ -90,9 +114,21 @@ def auth_login(method: str, no_browser: bool) -> None:
 
 
 @auth.command("status")
-def auth_status_command() -> None:
+@click.option(
+    "--provider",
+    type=AUTH_PROVIDER_CHOICE,
+    default="codex",
+    show_default=True,
+    help="Subscription provider to inspect.",
+)
+def auth_status_command(provider: str) -> None:
     """Show current auth status."""
-    status = auth_status()
+    normalized = normalize_auth_provider(provider)
+    status = (
+        anthropic_auth.auth_status()
+        if normalized == "anthropic"
+        else auth_status()
+    )
     click.echo(f"Auth path: {status['path']}")
     if not status["authenticated"]:
         click.echo(f"Status:    not authenticated")
@@ -100,14 +136,30 @@ def auth_status_command() -> None:
             click.echo(f"Error:     {status['error']}")
         return
     click.echo("Status:    authenticated")
-    click.echo(f"Account:   {status.get('account_id')}")
+    if status.get("account_id"):
+        click.echo(f"Account:   {status.get('account_id')}")
+    if status.get("expires"):
+        click.echo(f"Expires:   {format_epoch_ms(int(status['expires']))}")
     click.echo(f"Expired:   {status.get('expired')}")
 
 
 @auth.command("refresh")
-def auth_refresh_command() -> None:
-    """Refresh the stored Codex access token."""
+@click.option(
+    "--provider",
+    type=AUTH_PROVIDER_CHOICE,
+    default="codex",
+    show_default=True,
+    help="Subscription provider to refresh.",
+)
+def auth_refresh_command(provider: str) -> None:
+    """Refresh a stored access token."""
+    normalized = normalize_auth_provider(provider)
     try:
+        if normalized == "anthropic":
+            token = anthropic_auth.refresh_auth()
+            click.echo("Refreshed.")
+            click.echo(f"Expires: {format_epoch_ms(token.expires)}")
+            return
         credentials = refresh_auth()
     except ConduitAuthError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -116,9 +168,21 @@ def auth_refresh_command() -> None:
 
 
 @auth.command("logout")
-def auth_logout_command() -> None:
+@click.option(
+    "--provider",
+    type=AUTH_PROVIDER_CHOICE,
+    default="codex",
+    show_default=True,
+    help="Subscription provider to log out.",
+)
+def auth_logout_command(provider: str) -> None:
     """Delete Conduit's stored auth state."""
-    removed = auth_logout()
+    normalized = normalize_auth_provider(provider)
+    removed = (
+        anthropic_auth.logout()
+        if normalized == "anthropic"
+        else auth_logout()
+    )
     click.echo("Logged out." if removed else "No auth state found.")
 
 
@@ -225,7 +289,7 @@ def tunnel(host: str, port: int, install_cloudflared: bool) -> None:
             "cloudflared was not found. Install it or rerun with --install-cloudflared."
         )
     click.echo("Starting Cloudflare Quick Tunnel.")
-    click.echo("Use the generated https://*.trycloudflare.com/codex URL in Cursor.")
+    click.echo("Use /codex for OpenAI-compatible Codex or /anthropic for Claude.")
     raise SystemExit(
         subprocess.call([str(cloudflared), "tunnel", "--url", f"http://{host}:{port}"])
     )
@@ -242,8 +306,13 @@ def doctor(host: str, port: int) -> None:
     click.echo(f"OS:           {platform.platform()}")
     click.echo(f"Home:         {conduit_home()}")
     click.echo(f"Config:       {conduit_home() / '.env'}")
-    click.echo(f"Auth:         {auth_path()}")
-    click.echo(f"Auth status:  {'ok' if auth_status()['authenticated'] else 'missing'}")
+    click.echo(f"Codex auth:   {auth_path()}")
+    click.echo(f"Codex status: {'ok' if auth_status()['authenticated'] else 'missing'}")
+    click.echo(f"Claude auth:  {anthropic_auth_path()}")
+    claude_status = anthropic_auth.auth_status()
+    click.echo(
+        f"Claude status:{' ok' if claude_status['authenticated'] else ' missing'}"
+    )
     click.echo(f"Service key:  {'set' if service_key() else 'missing'}")
     click.echo(f"cloudflared:  {find_cloudflared() or 'missing'}")
     click.echo(f"Listening:    {is_listening(host, port)} ({host}:{port})")
@@ -317,6 +386,7 @@ def start_background(*, host: str, port: int, wait: bool) -> None:
     err_log = logs_dir(home) / f"conduit_{port}.err.log"
     command = [
         sys.executable,
+        "-u",
         "-m",
         "conduit.cli",
         "start",
@@ -328,10 +398,11 @@ def start_background(*, host: str, port: int, wait: bool) -> None:
     ]
     env = os.environ.copy()
     env["CONDUIT_HOME"] = str(home)
+    env["PYTHONUNBUFFERED"] = "1"
     process = subprocess.Popen(
         command,
-        stdout=out_log.open("wb"),
-        stderr=err_log.open("wb"),
+        stdout=out_log.open("ab"),
+        stderr=err_log.open("ab"),
         env=env,
         creationflags=windows_no_window_flags(),
     )
@@ -366,6 +437,18 @@ def wait_for_health(host: str, port: int) -> None:
         except requests.RequestException:
             time.sleep(0.5)
     raise click.ClickException(f"Conduit did not become healthy at {url}")
+
+
+def normalize_auth_provider(provider: str) -> str:
+    """Normalize provider aliases used by the auth CLI."""
+    return "anthropic" if provider in {"anthropic", "claude"} else "codex"
+
+
+def format_epoch_ms(value: int) -> str:
+    """Format a millisecond epoch without exposing token material."""
+    if value <= 0:
+        return "unknown"
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(value / 1000))
 
 
 def terminate_pid(pid: int) -> None:

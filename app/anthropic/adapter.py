@@ -1,4 +1,4 @@
-"""Flask adapter for the Codex provider."""
+"""Flask adapter for the Anthropic provider."""
 
 from __future__ import annotations
 
@@ -9,30 +9,36 @@ import requests
 from flask import Request, Response, jsonify, stream_with_context
 
 from ..common.logging import console
-from .auth_state import AuthStateError, CodexAuthManager, CodexAuthStore
-from .request_adapter import CursorRequestAdapter, UnsupportedCursorShape
-from .response_adapter import adapt_responses_sse_to_chat_sse
-from .settings import CodexSettings
-from .upstream import build_upstream_headers, post_responses
+from .auth_state import (
+    AnthropicAuthManager,
+    AnthropicAuthStateError,
+    AnthropicAuthStore,
+)
+from .openai_request_adapter import AnthropicOpenAIRequestAdapter
+from .openai_response_adapter import adapt_anthropic_sse_to_chat_sse
+from .request_adapter import AnthropicRequestAdapter, UnsupportedAnthropicShape
+from .response_adapter import log_anthropic_sse_usage
+from .settings import AnthropicSettings
+from .upstream import build_upstream_headers, post_messages
 
 
-class CodexAdapter:
-    """Forward Flask requests to the ChatGPT Codex backend."""
+class AnthropicAdapter:
+    """Forward Flask requests to Anthropic Messages."""
 
-    def __init__(self, settings: CodexSettings | None = None) -> None:
+    def __init__(self, settings: AnthropicSettings | None = None) -> None:
         """Initialize the adapter with current Flask-backed settings."""
-        self.settings = settings or CodexSettings()
+        self.settings = settings or AnthropicSettings()
 
     def ready(self) -> Response:
-        """Return Codex readiness based on local auth state."""
+        """Return Anthropic readiness based on local auth state."""
         try:
-            CodexAuthStore(self.settings.codex_auth_path).validate_ready()
-        except AuthStateError as exc:
+            AnthropicAuthStore(self.settings.auth_path).validate_ready()
+        except AnthropicAuthStateError as exc:
             return jsonify({"status": "not_ready", "error": str(exc)}), 503
         return jsonify({"status": "ready"})
 
     def forward(self, req: Request, provider_path: str) -> Response:
-        """Forward a request to Codex and adapt the response when needed."""
+        """Forward a native Anthropic request to Anthropic."""
         payload = req.get_json(silent=True)
         if not isinstance(payload, dict):
             return jsonify({"error": {"message": "Request body must be JSON"}}), 400
@@ -44,34 +50,39 @@ class CodexAdapter:
         provider_path: str,
         downstream_headers: dict[str, str],
     ) -> Response:
-        """Forward an already-decoded payload to Codex."""
+        """Forward an already-decoded payload to Anthropic."""
+        chat_response = _wants_chat_completion_response(provider_path)
         try:
             console.print(
-                "[bold cyan]CODEX INBOUND:[/bold cyan] "
+                "[bold cyan]ANTHROPIC INBOUND:[/bold cyan] "
                 f"path={provider_path} model={payload.get('model')!r}"
             )
-            adapted = CursorRequestAdapter(self.settings).adapt(
-                provider_path, payload, downstream_headers
-            )
-            auth_manager = CodexAuthManager(
-                CodexAuthStore(self.settings.codex_auth_path),
+            if chat_response:
+                adapted = AnthropicOpenAIRequestAdapter(self.settings).adapt(
+                    provider_path, payload
+                )
+            else:
+                adapted = AnthropicRequestAdapter(self.settings).adapt(
+                    provider_path, payload
+                )
+            auth_manager = AnthropicAuthManager(
+                AnthropicAuthStore(self.settings.auth_path),
                 refresh_skew_seconds=self.settings.token_refresh_skew_seconds,
             )
             auth = auth_manager.current()
-        except (UnsupportedCursorShape, AuthStateError) as exc:
-            console.print(f"[bold red]CODEX REQUEST REJECTED:[/bold red] {exc}")
+        except (UnsupportedAnthropicShape, AnthropicAuthStateError) as exc:
+            console.print(f"[bold red]ANTHROPIC REQUEST REJECTED:[/bold red] {exc}")
             return jsonify({"error": {"message": str(exc)}}), 400
 
         headers = build_upstream_headers(
             self.settings,
             auth,
-            session_id=adapted.session_id,
-            thread_id=adapted.thread_id,
             downstream_headers=downstream_headers,
+            fast_mode=adapted.body.get("speed") == "fast",
         )
         try:
-            upstream_response = post_responses(
-                self.settings.codex_responses_url,
+            upstream_response = post_messages(
+                self.settings.messages_url,
                 headers,
                 adapted.body,
                 timeout=self.settings.request_timeout_seconds,
@@ -82,12 +93,11 @@ class CodexAdapter:
                 headers = build_upstream_headers(
                     self.settings,
                     auth,
-                    session_id=adapted.session_id,
-                    thread_id=adapted.thread_id,
                     downstream_headers=downstream_headers,
+                    fast_mode=adapted.body.get("speed") == "fast",
                 )
-                upstream_response = post_responses(
-                    self.settings.codex_responses_url,
+                upstream_response = post_messages(
+                    self.settings.messages_url,
                     headers,
                     adapted.body,
                     timeout=self.settings.request_timeout_seconds,
@@ -95,24 +105,27 @@ class CodexAdapter:
         except requests.RequestException as exc:
             return (
                 jsonify(
-                    {"error": {"message": f"Codex upstream request failed: {exc}"}}
+                    {"error": {"message": f"Anthropic upstream request failed: {exc}"}}
                 ),
                 502,
             )
-        except AuthStateError as exc:
+        except AnthropicAuthStateError as exc:
             return jsonify({"error": {"message": str(exc)}}), 400
 
         def stream_response():
             try:
                 chunks = _response_chunks(upstream_response)
-                if (
-                    _wants_chat_completion_response(provider_path)
-                    and upstream_response.status_code == 200
+                content_type = upstream_response.headers.get("content-type", "")
+                if chat_response and upstream_response.status_code == 200:
+                    chunks = adapt_anthropic_sse_to_chat_sse(
+                        chunks, model=adapted.upstream_model
+                    )
+                elif (
+                    upstream_response.status_code == 200
+                    and "text/event-stream" in content_type
                 ):
-                    chunks = adapt_responses_sse_to_chat_sse(
-                        chunks,
-                        model=str(adapted.body.get("model", "")),
-                        reasoning_display_mode=self.settings.reasoning_display_mode,
+                    chunks = log_anthropic_sse_usage(
+                        chunks, model=adapted.upstream_model
                     )
                 yield from chunks
             finally:

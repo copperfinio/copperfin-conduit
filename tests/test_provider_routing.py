@@ -19,13 +19,15 @@ def test_root_and_azure_models_return_azure_models(testapp):
     assert "gpt-5.5" in root_ids
 
 
-def test_codex_models_return_codex_models(testapp):
-    """Codex model routes expose the Codex provider model list."""
+def test_codex_models_return_cursor_openai_override_models(testapp):
+    """Codex model routes expose every model usable through Cursor's OpenAI override."""
     response = testapp.get("/codex/v1/models", headers=AUTH, status=200)
 
     assert [item["id"] for item in response.json["data"]] == [
         "codex-test-model",
         "codex-other-model",
+        "claude-opus-4-8",
+        "claude-sonnet-4-6",
     ]
 
 

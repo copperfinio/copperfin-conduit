@@ -8,9 +8,15 @@ from .exceptions import CursorConfigurationError
 
 
 def valid_bearer_token():
-    """Validate the bearer token."""
+    """Validate the local service token from OpenAI or Anthropic-style headers."""
     service_api_key = current_app.config["SERVICE_API_KEY"]
-    return request.authorization and request.authorization.token == service_api_key
+    if request.authorization and request.authorization.token == service_api_key:
+        return True
+    for header in ("x-api-key", "anthropic-api-key", "api-key"):
+        if request.headers.get(header) == service_api_key:
+            return True
+    auth_header = request.headers.get("Authorization", "")
+    return auth_header == f"Bearer {service_api_key}"
 
 
 def require_auth(func):

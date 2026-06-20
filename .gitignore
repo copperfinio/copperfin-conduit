@@ -11,6 +11,7 @@ cursor_proxy*.log
 *.so
 
 # Packages
+/dist/
 *.egg
 *.egg-info
 build
@@ -46,6 +47,7 @@ env/
 
 # Recordings
 /recordings/
+/preview/
 
 # Legacy openai backend
 backend_openai.py

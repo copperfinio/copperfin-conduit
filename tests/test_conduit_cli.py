@@ -25,8 +25,10 @@ def test_init_creates_user_scoped_conduit_files(monkeypatch, tmp_path):
 
     assert result.exit_code == 0
     assert tmp_path.joinpath(".conduit", ".env").exists()
-    assert "Auth path:" in result.output
+    assert "Codex auth:" in result.output
+    assert "Claude auth:" in result.output
     assert str(tmp_path.joinpath(".conduit", "auth.json")) in result.output
+    assert str(tmp_path.joinpath(".conduit", "anthropic_auth.json")) in result.output
 
 
 def test_service_install_dry_run_is_safe(monkeypatch, tmp_path):

@@ -26,6 +26,16 @@ def create_app(config_object="app.settings"):
         app.config["CODEX_SUPPORTED_MODELS"] = tuple(
             app.config["CODEX_SUPPORTED_MODELS"]
         )
+    if "ANTHROPIC_MODEL_PROFILES" in app.config:
+        app.config["ANTHROPIC_MODEL_PROFILES"] = dict(
+            app.config["ANTHROPIC_MODEL_PROFILES"]
+        )
+    if "ANTHROPIC_SUPPORTED_MODELS" in app.config:
+        app.config["ANTHROPIC_SUPPORTED_MODELS"] = tuple(
+            app.config["ANTHROPIC_SUPPORTED_MODELS"]
+        )
+    if "FUSION_MODEL_PROFILES" in app.config:
+        app.config["FUSION_MODEL_PROFILES"] = dict(app.config["FUSION_MODEL_PROFILES"])
 
     configure_logging(app)
     register_commands(app)
