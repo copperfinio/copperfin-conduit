@@ -74,6 +74,30 @@ def test_openai_chat_request_maps_to_anthropic_messages():
     assert "temperature" not in body
 
 
+def test_openai_chat_opus_drops_trailing_assistant_prefill():
+    """Cursor assistant prefill is removed before Opus upstream calls."""
+    adapter = AnthropicOpenAIRequestAdapter(TestAnthropicSettings())
+
+    adapted = adapter.adapt(
+        "/v1/chat/completions",
+        {
+            "model": "cp-opus48-ultra",
+            "messages": [
+                {"role": "system", "content": "Follow project rules."},
+                {"role": "user", "content": "Continue this task."},
+                {"role": "assistant", "content": "Sure"},
+            ],
+        },
+    )
+
+    assert adapted.body["messages"] == [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "Continue this task."}],
+        }
+    ]
+
+
 def test_openai_tool_results_and_assistant_tool_calls_map_to_anthropic_blocks():
     """Tool-call continuations retain IDs and arguments."""
     adapter = AnthropicOpenAIRequestAdapter(TestAnthropicSettings())

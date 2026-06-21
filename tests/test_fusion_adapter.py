@@ -4,10 +4,29 @@ from __future__ import annotations
 
 from flask import current_app
 
+from app.anthropic.openai_request_adapter import AnthropicOpenAIRequestAdapter
+from app.anthropic.settings import AnthropicModelProfile
 from app.fusion.adapter import FusionAdapter
 from app.fusion.adapter import _final_payload, _panel_payload
 from app.fusion.invoker import PanelResult
 from app.fusion.settings import FusionModelProfile
+
+
+class AnthropicSettingsForFusionPanel:
+    """Settings stand-in for Fusion panel adapter tests."""
+
+    supported_models = ("claude-opus-4-8",)
+    model_profiles = {
+        "cp-opus48-xhigh": AnthropicModelProfile(
+            model="claude-opus-4-8",
+            effort="xhigh",
+            max_tokens=65536,
+        )
+    }
+    cache_control = "auto"
+    cache_ttl = "5m"
+    thinking_display = "summarized"
+    eager_tool_streaming = True
 
 
 def test_panel_payload_is_text_only_and_strips_tools():
@@ -52,6 +71,35 @@ def test_panel_payload_is_text_only_and_strips_tools():
         "content": "review this\n[image]",
     }
     assert "read_file" in panel_payload["messages"][2]["content"]
+
+
+def test_fusion_opus_panel_drops_trailing_assistant_prefill():
+    """Fusion's private Opus panel path must not forward assistant prefill."""
+    payload = {
+        "model": "cp-fusion55",
+        "messages": [
+            {"role": "user", "content": "review this change"},
+            {"role": "assistant", "content": "I will review"},
+        ],
+        "stream": True,
+    }
+
+    panel_payload = _panel_payload(
+        payload,
+        model="cp-opus48-xhigh",
+        max_tokens=512,
+    )
+    adapted = AnthropicOpenAIRequestAdapter(
+        AnthropicSettingsForFusionPanel()
+    ).adapt("/v1/chat/completions", panel_payload)
+
+    assert adapted.upstream_model == "claude-opus-4-8"
+    assert adapted.body["messages"] == [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "review this change"}],
+        }
+    ]
 
 
 def test_final_payload_uses_primary_model_and_preserves_tools():

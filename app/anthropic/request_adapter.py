@@ -59,6 +59,7 @@ class AnthropicRequestAdapter:
         self._apply_prompt_cache(body)
         self._apply_claude_code_system(body)
         self._apply_tool_streaming(body)
+        self._strip_unsupported_assistant_prefill(body)
         self._strip_unsupported_sampling(body)
 
         from ..common.logging import console
@@ -171,6 +172,34 @@ class AnthropicRequestAdapter:
             return
         for key in _UNSUPPORTED_OPUS_SAMPLING_PARAMS:
             body.pop(key, None)
+
+    def _strip_unsupported_assistant_prefill(self, body: dict[str, Any]) -> None:
+        model = str(body.get("model", ""))
+        if not _is_opus_47_plus(model):
+            return
+        messages = body.get("messages")
+        if not isinstance(messages, list):
+            return
+
+        # Opus 4.7+ rejects assistant prefill in this proxy shape. Cursor can
+        # send a trailing assistant message, so trim only the trailing prefill
+        # while preserving normal assistant turns inside the conversation.
+        trimmed = list(messages)
+        while (
+            trimmed
+            and isinstance(trimmed[-1], dict)
+            and trimmed[-1].get("role") == "assistant"
+        ):
+            trimmed.pop()
+
+        if len(trimmed) == len(messages):
+            return
+        if not trimmed:
+            raise UnsupportedAnthropicShape(
+                "Anthropic Opus requests cannot contain only assistant prefill; "
+                "include a user message."
+            )
+        body["messages"] = trimmed
 
 
 def _is_opus_47_plus(model: str) -> bool:

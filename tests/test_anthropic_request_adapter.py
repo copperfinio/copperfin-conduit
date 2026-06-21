@@ -66,6 +66,26 @@ def test_profile_maps_opus_effort_cache_identity_and_sampling_cleanup():
     assert "top_k" not in body
 
 
+def test_opus_profile_drops_trailing_assistant_prefill():
+    """Opus aliases must not forward Cursor assistant prefill upstream."""
+    adapter = AnthropicRequestAdapter(TestAnthropicSettings())
+
+    adapted = adapter.adapt(
+        "/v1/messages",
+        {
+            "model": "cp-opus48-xfast",
+            "messages": [
+                {"role": "user", "content": "finish the work"},
+                {"role": "assistant", "content": "I will"},
+            ],
+        },
+    )
+
+    assert adapted.body["messages"] == [
+        {"role": "user", "content": "finish the work"}
+    ]
+
+
 def test_direct_model_keeps_existing_cache_control():
     """Explicit cache settings are preserved for Anthropic-native requests."""
     adapter = AnthropicRequestAdapter(TestAnthropicSettings())
