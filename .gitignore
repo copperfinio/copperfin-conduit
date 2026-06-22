@@ -32,6 +32,8 @@ pip-log.txt
 .coverage
 htmlcov/
 coverage.xml
+.playwright-cli/
+output/playwright/
 
 # Complexity
 output/*.html

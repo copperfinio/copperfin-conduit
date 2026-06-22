@@ -16,7 +16,7 @@ This is local-first infrastructure. Your tool talks to Conduit. Conduit talks to
 - Chat image inputs mapped to Responses image input parts
 - Prompt cache keys and cache-hit usage reporting
 - Cursor model picker entries for custom model/effort presets
-- Fusion-style compound aliases with private panel/judge calls
+- Fusion-style compound aliases with private panel and synthesizer calls
 - Direct ChatGPT/Codex OAuth login through Conduit
 - Direct Claude/Anthropic OAuth login through Conduit
 - Browser OAuth and device-code OAuth
@@ -274,23 +274,23 @@ Fast mode maps to `speed: "fast"` and the `fast-mode-2026-02-01` beta header. An
 Fusion profiles:
 
 ```text
-cp-fusion55       -> private GPT-5.5 + Opus panel, GPT-5.5 xfast final
+cp-fusion55       -> private GPT-5.5 xhigh + Opus xhigh panel, Opus xhigh final
 cp-fusion55-fast  -> smaller private GPT-5.5 + Opus panel, GPT-5.5 fast final
 ```
 
 They are configured in `~/.conduit/.env`:
 
 ```text
-FUSION_MODEL_PROFILES=cp-fusion55:cp-gpt55-xfast:cp-gpt55-high|cp-opus48-xhigh:cp-gpt55-balanced,cp-fusion55-fast:cp-gpt55-fast:cp-gpt55-balanced|cp-opus48-high
+FUSION_MODEL_PROFILES=cp-fusion55:cp-opus48-xhigh:cp-gpt55-xhigh|cp-opus48-xhigh,cp-fusion55-fast:cp-gpt55-fast:cp-gpt55-balanced|cp-opus48-high
 ```
 
 Format:
 
 ```text
-alias:primary_model:panel_model_1|panel_model_2[:judge_model]
+alias:synthesizer_model:panel_model_1|panel_model_2
 ```
 
-Fusion runs private text-only panel calls, optionally runs a judge call, then injects the synthesis as advisory system context before streaming the final primary model response back to Cursor. Tools stay on the final Cursor-facing turn; private panel calls do not execute tools.
+Fusion runs private text-only panel calls, then injects that panel context as advisory system context before streaming one final synthesizer response back to Cursor. Tools stay on the final Cursor-facing turn; private panel calls do not execute tools.
 
 Fusion is in-process proxy orchestration, not a CLI shim. Conduit uses Python worker threads for private panel calls and direct provider HTTP calls for Codex/Claude. It does not shell out to `codex`, Claude Code, Pi, or any other agent runtime per request.
 
@@ -355,7 +355,7 @@ ANTHROPIC_MODEL_PROFILES
 ANTHROPIC_CACHE_CONTROL  auto, off, 5m, or 1h
 ANTHROPIC_THINKING_DISPLAY summarized or omitted
 FUSION_MODEL_PROFILES    Compound aliases exposed through /codex
-FUSION_PANEL_MAX_TOKENS  Per-panel and judge output cap
+FUSION_PANEL_MAX_TOKENS  Per-panel output cap
 FUSION_PANEL_TIMEOUT_SECONDS
 ```
 
@@ -396,14 +396,14 @@ ANTHROPIC USAGE: model=claude-opus-4-8 input=60000 cache_read=52000 (87%) cache_
 
 The Claude route passes native Anthropic usage back to Cursor unchanged and logs cache reads/writes from `cache_read_input_tokens`, `cache_creation_input_tokens`, and the newer `cache_creation` details when present.
 
-Fusion panel and judge calls log their own usage:
+Fusion panel calls log their own usage:
 
 ```text
 FUSION USAGE: model=cp-opus48-xhigh provider=anthropic input=60000 cache_read=52000 (87%) cache_write=8000 output=900 total=120900 stop=end_turn
 FUSION USAGE: model=cp-gpt55-balanced provider=codex input=137474 cache_read=133888 (97%) cache_write=0 output=319 total=137793 stop=completed
 ```
 
-The final primary response still emits normal Codex or Anthropic usage chunks/logs. Background mode starts Python unbuffered and appends to `~/.conduit/logs/conduit_<port>.out.log`, so cache and Fusion lines are available while Cursor is running instead of only after process exit.
+The final synthesizer response still emits normal Codex or Anthropic usage chunks/logs. Background mode starts Python unbuffered and appends to `~/.conduit/logs/conduit_<port>.out.log`, so cache and Fusion lines are available while Cursor is running instead of only after process exit.
 
 ## Development
 
@@ -449,7 +449,7 @@ Conduit is early. The plumbing has been proven against Cursor Agent with:
 - Anthropic-native Claude OAuth routing
 - Claude Opus 4.8 effort profiles
 - Anthropic prompt-cache and usage logging
-- Fusion-style private panel/judge routing
+- Fusion-style private panel and synthesizer routing
 
 The project is not affiliated with OpenAI, Anthropic, Cursor, Cloudflare, or the upstream projects credited below.
 

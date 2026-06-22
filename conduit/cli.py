@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -17,8 +18,7 @@ from pathlib import Path
 import click
 import requests
 
-from . import __version__
-from . import anthropic_auth
+from . import __version__, anthropic_auth
 from .auth import (
     ConduitAuthError,
     auth_status,
@@ -125,13 +125,11 @@ def auth_status_command(provider: str) -> None:
     """Show current auth status."""
     normalized = normalize_auth_provider(provider)
     status = (
-        anthropic_auth.auth_status()
-        if normalized == "anthropic"
-        else auth_status()
+        anthropic_auth.auth_status() if normalized == "anthropic" else auth_status()
     )
     click.echo(f"Auth path: {status['path']}")
     if not status["authenticated"]:
-        click.echo(f"Status:    not authenticated")
+        click.echo("Status:    not authenticated")
         if status.get("error"):
             click.echo(f"Error:     {status['error']}")
         return
@@ -178,11 +176,7 @@ def auth_refresh_command(provider: str) -> None:
 def auth_logout_command(provider: str) -> None:
     """Delete Conduit's stored auth state."""
     normalized = normalize_auth_provider(provider)
-    removed = (
-        anthropic_auth.logout()
-        if normalized == "anthropic"
-        else auth_logout()
-    )
+    removed = anthropic_auth.logout() if normalized == "anthropic" else auth_logout()
     click.echo("Logged out." if removed else "No auth state found.")
 
 
@@ -209,14 +203,45 @@ def auth_import_codex(source: Path) -> None:
 @click.option("--foreground", is_flag=True, help="Run in the foreground.")
 @click.option("--background", is_flag=True, help="Run in the background.")
 @click.option("--wait/--no-wait", default=True, show_default=True)
-def start(host: str, port: int, foreground: bool, background: bool, wait: bool) -> None:
+@click.option(
+    "--dashboard/--no-dashboard",
+    default=True,
+    show_default=True,
+    help="Run the unauthenticated local-only telemetry dashboard alongside the proxy.",
+)
+@click.option(
+    "--dashboard-port",
+    default=None,
+    type=int,
+    help="Localhost port for the telemetry dashboard; defaults to DASHBOARD_PORT or 20130.",
+)
+def start(
+    host: str,
+    port: int,
+    foreground: bool,
+    background: bool,
+    wait: bool,
+    dashboard: bool,
+    dashboard_port: int | None,
+) -> None:
     """Start the local Conduit proxy."""
     if foreground and background:
         raise click.ClickException("Use either --foreground or --background, not both.")
     if background:
-        start_background(host=host, port=port, wait=wait)
+        start_background(
+            host=host,
+            port=port,
+            wait=wait,
+            dashboard=dashboard,
+            dashboard_port=dashboard_port,
+        )
         return
-    run_foreground(host=host, port=port)
+    run_foreground(
+        host=host,
+        port=port,
+        dashboard=dashboard,
+        dashboard_port=dashboard_port,
+    )
 
 
 @cli.command()
@@ -251,7 +276,7 @@ def smoke(root_url: str, model: str, api_key: str, cache_probe: bool) -> None:
             cache_probe=cache_probe,
         ):
             click.echo(line)
-    except Exception as exc:
+    except Exception as exc:  # noqa: B902
         raise click.ClickException(str(exc)) from exc
 
 
@@ -334,12 +359,33 @@ def service() -> None:
 @click.option("--port", default=20129, show_default=True, type=int)
 @click.option("--dry-run", is_flag=True, help="Print actions without applying them.")
 @click.option("--start/--no-start", default=True, show_default=True)
-def service_install_command(host: str, port: int, dry_run: bool, start: bool) -> None:
+@click.option(
+    "--dashboard/--no-dashboard",
+    default=True,
+    show_default=True,
+    help="Launch the unauthenticated local-only dashboard with the service.",
+)
+@click.option("--dashboard-port", default=20130, show_default=True, type=int)
+def service_install_command(
+    host: str,
+    port: int,
+    dry_run: bool,
+    start: bool,
+    dashboard: bool,
+    dashboard_port: int,
+) -> None:
     """Install Conduit for startup."""
     ensure_env_file()
     try:
-        commands = install_service(host=host, port=port, dry_run=dry_run, start=start)
-    except Exception as exc:
+        commands = install_service(
+            host=host,
+            port=port,
+            dry_run=dry_run,
+            start=start,
+            dashboard=dashboard,
+            dashboard_port=dashboard_port,
+        )
+    except Exception as exc:  # noqa: B902
         raise click.ClickException(str(exc)) from exc
     for command in commands:
         click.echo(command)
@@ -351,7 +397,7 @@ def service_uninstall_command(dry_run: bool) -> None:
     """Uninstall Conduit's service integration."""
     try:
         commands = uninstall_service(dry_run=dry_run)
-    except Exception as exc:
+    except Exception as exc:  # noqa: B902
         raise click.ClickException(str(exc)) from exc
     for command in commands:
         click.echo(command)
@@ -363,21 +409,65 @@ def service_status_command() -> None:
     raise SystemExit(service_status())
 
 
-def run_foreground(*, host: str, port: int) -> None:
+def run_foreground(
+    *,
+    host: str,
+    port: int,
+    dashboard: bool = True,
+    dashboard_port: int | None = None,
+) -> None:
     """Run Flask in the current process."""
     ensure_env_file()
     values = load_env()
     apply_env(values)
+    resolved_dashboard_port = resolve_dashboard_port(dashboard_port)
     from app import create_app
 
     app = create_app()
+    if dashboard:
+        start_dashboard_thread(port=resolved_dashboard_port)
+        click.echo(
+            f"Dashboard listening on http://127.0.0.1:{resolved_dashboard_port}/dashboard/"
+        )
     click.echo(f"Conduit listening on http://{host}:{port}")
     app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
 
 
-def start_background(*, host: str, port: int, wait: bool) -> None:
+def start_dashboard_thread(*, port: int) -> None:
+    """Start the unauthenticated local-only dashboard server in a daemon thread."""
+    if is_listening("127.0.0.1", port):
+        click.echo(f"Dashboard port {port} already in use; skipping dashboard.")
+        return
+    from app.dashboard.app import create_dashboard_app
+
+    dashboard_app = create_dashboard_app()
+
+    def serve() -> None:
+        dashboard_app.run(
+            host="127.0.0.1",
+            port=port,
+            debug=False,
+            use_reloader=False,
+            threaded=True,
+        )
+
+    thread = threading.Thread(target=serve, name="conduit-dashboard", daemon=True)
+    thread.start()
+
+
+def start_background(
+    *,
+    host: str,
+    port: int,
+    wait: bool,
+    dashboard: bool = True,
+    dashboard_port: int | None = None,
+) -> None:
     """Start Conduit in a background process."""
     ensure_env_file()
+    values = load_env()
+    apply_env(values)
+    resolved_dashboard_port = resolve_dashboard_port(dashboard_port)
     if is_listening(host, port):
         click.echo(f"Conduit is already listening on {host}:{port}.")
         return
@@ -395,7 +485,10 @@ def start_background(*, host: str, port: int, wait: bool) -> None:
         host,
         "--port",
         str(port),
+        "--dashboard-port",
+        str(resolved_dashboard_port),
     ]
+    command.append("--dashboard" if dashboard else "--no-dashboard")
     env = os.environ.copy()
     env["CONDUIT_HOME"] = str(home)
     env["PYTHONUNBUFFERED"] = "1"
@@ -415,6 +508,26 @@ def start_background(*, host: str, port: int, wait: bool) -> None:
     if wait:
         wait_for_health(host, port)
         click.echo(f"Health: http://{host}:{port}/health")
+
+
+def resolve_dashboard_port(dashboard_port: int | None) -> int:
+    """Resolve dashboard port from CLI, env, or the built-in default."""
+    if dashboard_port is not None:
+        return validate_port(dashboard_port, source="--dashboard-port")
+    raw = os.environ.get("DASHBOARD_PORT", "").strip()
+    if not raw:
+        return 20130
+    try:
+        return validate_port(int(raw), source="DASHBOARD_PORT")
+    except ValueError as exc:
+        raise click.ClickException("DASHBOARD_PORT must be an integer.") from exc
+
+
+def validate_port(port: int, *, source: str) -> int:
+    """Validate a TCP port number from CLI or environment."""
+    if port < 1 or port > 65535:
+        raise click.ClickException(f"{source} must be between 1 and 65535.")
+    return port
 
 
 def is_listening(host: str, port: int) -> bool:

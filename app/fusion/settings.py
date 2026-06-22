@@ -14,9 +14,8 @@ from ..exceptions import ServiceConfigurationError
 class FusionModelProfile:
     """A Cursor-facing compound model profile."""
 
-    primary_model: str
+    synthesizer_model: str
     panel_models: tuple[str, ...]
-    judge_model: str | None = None
 
 
 def parse_fusion_model_profiles(
@@ -24,7 +23,7 @@ def parse_fusion_model_profiles(
 ) -> dict[str, FusionModelProfile]:
     """Parse FUSION_MODEL_PROFILES entries.
 
-    Format: alias:primary:panel1|panel2[:judge]
+    Format: alias:synthesizer:panel1|panel2
     """
     if not raw:
         return {}
@@ -35,21 +34,19 @@ def parse_fusion_model_profiles(
         if not item:
             continue
         parts = [part.strip() for part in item.split(":")]
-        if len(parts) not in {3, 4}:
+        if len(parts) != 3:
             raise ServiceConfigurationError(
                 "FUSION_MODEL_PROFILES entries must use "
-                "alias:primary:panel1|panel2[:judge] format."
+                "alias:synthesizer:panel1|panel2 format."
             )
-        alias, primary, panel_raw = parts[:3]
-        judge = parts[3] if len(parts) == 4 and parts[3] else None
+        alias, synthesizer, panel_raw = parts[:3]
         panel = tuple(part.strip() for part in panel_raw.split("|") if part.strip())
-        if not alias or not primary or not panel:
+        if not alias or not synthesizer or not panel:
             raise ServiceConfigurationError(
-                "FUSION_MODEL_PROFILES entries must include alias, primary, and panel models."
+                "FUSION_MODEL_PROFILES entries must include alias, "
+                "synthesizer, and panel models."
             )
-        referenced = {primary, *panel}
-        if judge:
-            referenced.add(judge)
+        referenced = {synthesizer, *panel}
         unsupported = sorted(model for model in referenced if model not in supported_models)
         if unsupported:
             raise ServiceConfigurationError(
@@ -61,9 +58,8 @@ def parse_fusion_model_profiles(
                 f"FUSION_MODEL_PROFILES alias {alias!r} conflicts with a provider model."
             )
         profiles[alias] = FusionModelProfile(
-            primary_model=primary,
+            synthesizer_model=synthesizer,
             panel_models=panel,
-            judge_model=judge,
         )
     return profiles
 
@@ -78,7 +74,7 @@ class FusionSettings:
 
     @property
     def panel_max_tokens(self) -> int:
-        """Return max tokens for each panel or judge response."""
+        """Return max tokens for each private panel response."""
         return int(current_app.config["FUSION_PANEL_MAX_TOKENS"])
 
     @property
@@ -102,4 +98,3 @@ def fusion_model_payload(settings: Any | None = None) -> dict[str, Any]:
             for model in settings.model_profiles
         ],
     }
-

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from string import ascii_letters, digits
 from typing import Any, Iterable, Iterator
 
+from ..dashboard.telemetry import telemetry
 from ..reasoning_display import (
     DEFAULT_REASONING_DISPLAY_MODE,
     parse_reasoning_display_mode,
@@ -85,9 +86,10 @@ class SSEDecoder:
 class ChatSSEAdapter:
     """Translate Codex Responses SSE events into Chat Completions chunks."""
 
-    def __init__(self, model: str, reasoning_display_mode: str):
+    def __init__(self, model: str, reasoning_display_mode: str, telemetry_id: str = ""):
         """Initialize stream state for one chat response."""
         self.model = model
+        self.telemetry_id = telemetry_id
         self.reasoning_display_mode = parse_reasoning_display_mode(
             reasoning_display_mode
         )
@@ -214,10 +216,14 @@ class ChatSSEAdapter:
 
     def _text_delta(self, obj: Any) -> dict[str, Any]:
         delta = obj.get("delta", "") if isinstance(obj, dict) else ""
+        if delta and self.telemetry_id:
+            telemetry.record_stream_delta(self.telemetry_id, text=delta)
         return self._chunk(delta={"role": "assistant", "content": delta})
 
     def _reasoning_delta(self, obj: Any) -> dict[str, Any]:
         delta = obj.get("delta", "") if isinstance(obj, dict) else ""
+        if delta and self.telemetry_id:
+            telemetry.record_stream_delta(self.telemetry_id, reasoning=delta)
         return self._chunk(
             delta=reasoning_content_delta(delta, self.reasoning_display_mode)
         )
@@ -226,6 +232,8 @@ class ChatSSEAdapter:
         if self.tool_calls < 1:
             return None
         delta = obj.get("delta", "") if isinstance(obj, dict) else ""
+        if delta and self.telemetry_id:
+            telemetry.record_stream_delta(self.telemetry_id, tool_delta=delta)
         return self._chunk(
             delta={
                 "tool_calls": [
@@ -243,6 +251,14 @@ class ChatSSEAdapter:
         self.usage = usage if isinstance(usage, dict) else None
         if isinstance(usage, dict):
             _log_usage(usage)
+            if self.telemetry_id:
+                telemetry.record_usage(
+                    self.telemetry_id,
+                    provider="codex",
+                    model=self.model,
+                    usage=usage,
+                    stop_reason="completed",
+                )
 
     def _usage_chunk(self) -> dict[str, Any] | None:
         if not isinstance(self.usage, dict):
@@ -303,10 +319,11 @@ def adapt_responses_sse_to_chat_sse(
     *,
     model: str,
     reasoning_display_mode: str = DEFAULT_REASONING_DISPLAY_MODE,
+    telemetry_id: str = "",
 ) -> Iterator[bytes]:
     """Adapt an upstream Responses SSE byte stream to Chat Completions SSE."""
     decoder = SSEDecoder()
-    adapter = ChatSSEAdapter(model, reasoning_display_mode)
+    adapter = ChatSSEAdapter(model, reasoning_display_mode, telemetry_id)
     for chunk in chunks:
         for event in decoder.feed(chunk):
             for message in adapter.handle(event):

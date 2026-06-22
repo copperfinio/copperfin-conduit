@@ -10,6 +10,7 @@ from string import ascii_letters, digits
 from typing import Any, Iterable, Iterator
 
 from ..codex.response_adapter import SSEDecoder, SSEEvent
+from ..dashboard.telemetry import telemetry
 
 
 @dataclass
@@ -21,9 +22,10 @@ class _ToolCallState:
 class AnthropicChatSSEAdapter:
     """Translate Anthropic Messages SSE into Chat Completions chunks."""
 
-    def __init__(self, model: str):
+    def __init__(self, model: str, telemetry_id: str = ""):
         """Initialize stream state for one chat response."""
         self.model = model
+        self.telemetry_id = telemetry_id
         self.chat_id = _chat_completion_id()
         self.blocks: dict[int, str] = {}
         self.tool_blocks: dict[int, _ToolCallState] = {}
@@ -64,6 +66,14 @@ class AnthropicChatSSEAdapter:
             chunks.append(usage)
         if self.usage:
             _log_usage(self.model, self.usage, self.stop_reason)
+            if self.telemetry_id:
+                telemetry.record_usage(
+                    self.telemetry_id,
+                    provider="anthropic",
+                    model=self.model,
+                    usage=self.usage,
+                    stop_reason=self.stop_reason,
+                )
         return chunks
 
     def _chunk(
@@ -138,21 +148,30 @@ class AnthropicChatSSEAdapter:
             return None
         delta_type = delta.get("type")
         if delta_type == "text_delta":
-            return self._chunk(
-                delta={"role": "assistant", "content": str(delta.get("text") or "")}
-            )
+            text = str(delta.get("text") or "")
+            if text and self.telemetry_id:
+                telemetry.record_stream_delta(self.telemetry_id, text=text)
+            return self._chunk(delta={"role": "assistant", "content": text})
+        if delta_type == "thinking_delta":
+            thinking = str(delta.get("thinking") or delta.get("text") or "")
+            if thinking and self.telemetry_id:
+                telemetry.record_stream_delta(self.telemetry_id, reasoning=thinking)
+            return None
         if delta_type == "input_json_delta":
             state = self.tool_blocks.get(index)
             if state is None:
                 return None
+            partial_json = str(delta.get("partial_json") or "")
+            if partial_json and self.telemetry_id:
+                telemetry.record_stream_delta(
+                    self.telemetry_id, tool_delta=partial_json
+                )
             return self._chunk(
                 delta={
                     "tool_calls": [
                         {
                             "index": state.index,
-                            "function": {
-                                "arguments": str(delta.get("partial_json") or "")
-                            },
+                            "function": {"arguments": partial_json},
                         }
                     ]
                 }
@@ -211,10 +230,11 @@ def adapt_anthropic_sse_to_chat_sse(
     chunks: Iterable[bytes],
     *,
     model: str,
+    telemetry_id: str = "",
 ) -> Iterator[bytes]:
     """Adapt an upstream Anthropic SSE byte stream to Chat Completions SSE."""
     decoder = SSEDecoder()
-    adapter = AnthropicChatSSEAdapter(model)
+    adapter = AnthropicChatSSEAdapter(model, telemetry_id)
     for chunk in chunks:
         for event in decoder.feed(chunk):
             for message in adapter.handle(event):

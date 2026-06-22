@@ -5,35 +5,25 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from typing import Any
+from uuid import uuid4
 
 from flask import Request, Response, current_app, jsonify
 
 from ..anthropic.adapter import AnthropicAdapter
-from ..common.logging import console
 from ..codex.adapter import CodexAdapter
+from ..common.logging import console
 from .invoker import FusionModelInvoker, PanelResult
 from .settings import FusionModelProfile, FusionSettings
 
 _PANEL_SYSTEM = """You are one member of a multi-model analysis panel.
 
-Give an independent, concise assessment for the primary coding agent.
+Give an independent, concise assessment for the synthesizer model.
 Do not call tools, do not claim to edit files, and do not address the user directly.
 Focus on correctness, risks, missing context, and the best next action."""
 
-_JUDGE_SYSTEM = """You are the judge in a multi-model analysis panel.
-
-Compare the panel responses and return a concise structured synthesis for the primary coding agent.
-Include:
-- consensus
-- contradictions
-- gaps or risks
-- strongest recommendation
-
-Do not address the user directly."""
-
 
 class FusionAdapter:
-    """Run panel analysis, then forward the original request to a primary model."""
+    """Run private panel analysis, then stream one tool-capable synthesizer response."""
 
     def __init__(
         self,
@@ -72,38 +62,33 @@ class FusionAdapter:
         downstream_headers = dict(req.headers)
         console.print(
             "[bold cyan]FUSION INBOUND:[/bold cyan] "
-            f"path={provider_path} model={model!r} primary={profile.primary_model} "
-            f"panel={list(profile.panel_models)} judge={profile.judge_model}"
+            f"path={provider_path} model={model!r} "
+            f"synthesizer={profile.synthesizer_model} panel={list(profile.panel_models)}"
         )
 
+        run_id = uuid4().hex
         panel_results = self._run_panel(
             payload=payload,
             profile=profile,
             downstream_headers=downstream_headers,
+            run_id=run_id,
         )
-        judge_result = self._run_judge(
-            payload=payload,
-            profile=profile,
-            panel_results=panel_results,
-            downstream_headers=downstream_headers,
-        )
-        final_payload = _final_payload(
+        final_payload = _synthesizer_payload(
             payload,
             profile=profile,
             panel_results=panel_results,
-            judge_result=judge_result,
         )
         console.print(
-            "[bold cyan]FUSION PRIMARY:[/bold cyan] "
-            f"inbound_model={model} primary_model={profile.primary_model} "
-            f"panel_ok={sum(1 for result in panel_results if result.ok)}/{len(panel_results)} "
-            f"judge_ok={judge_result.ok if judge_result else None}"
+            "[bold cyan]FUSION SYNTHESIZER:[/bold cyan] "
+            f"inbound_model={model} synthesizer_model={profile.synthesizer_model} "
+            f"panel_ok={sum(1 for result in panel_results if result.ok)}/{len(panel_results)}"
         )
-        return _forward_primary(
+        return _forward_synthesizer(
             req,
             provider_path=provider_path,
             payload=final_payload,
             invoker=self.invoker,
+            run_id=run_id,
         )
 
     def _run_panel(
@@ -112,6 +97,7 @@ class FusionAdapter:
         payload: dict[str, Any],
         profile: FusionModelProfile,
         downstream_headers: dict[str, str],
+        run_id: str | None = None,
     ) -> list[PanelResult]:
         panel_payloads = [
             _panel_payload(
@@ -135,33 +121,16 @@ class FusionAdapter:
                     model=str(panel_payload["model"]),
                     payload=panel_payload,
                     downstream_headers=downstream_headers,
+                    phase="panel",
+                    run_id=run_id,
+                    label=_fusion_call_label("panel", str(panel_payload["model"])),
                 )
                 for panel_payload in panel_payloads
             ]
             for future in as_completed(futures):
                 results.append(future.result())
-        return sorted(results, key=lambda result: profile.panel_models.index(result.model))
-
-    def _run_judge(
-        self,
-        *,
-        payload: dict[str, Any],
-        profile: FusionModelProfile,
-        panel_results: list[PanelResult],
-        downstream_headers: dict[str, str],
-    ) -> PanelResult | None:
-        if not profile.judge_model:
-            return None
-        judge_payload = _judge_payload(
-            payload,
-            model=profile.judge_model,
-            panel_results=panel_results,
-            max_tokens=self.settings.panel_max_tokens,
-        )
-        return self.invoker.invoke_text(
-            model=profile.judge_model,
-            payload=judge_payload,
-            downstream_headers=downstream_headers,
+        return sorted(
+            results, key=lambda result: profile.panel_models.index(result.model)
         )
 
 
@@ -172,6 +141,9 @@ def _invoke_with_app_context(
     model: str,
     payload: dict[str, Any],
     downstream_headers: dict[str, str],
+    phase: str | None = None,
+    run_id: str | None = None,
+    label: str | None = None,
 ) -> PanelResult:
     """Run a Fusion panel invocation with Flask config available in worker threads."""
     with app.app_context():
@@ -179,23 +151,59 @@ def _invoke_with_app_context(
             model=model,
             payload=payload,
             downstream_headers=downstream_headers,
+            phase=phase,
+            run_id=run_id,
+            label=label,
         )
 
 
-def _forward_primary(
+def _forward_synthesizer(
     req: Request,
     *,
     provider_path: str,
     payload: dict[str, Any],
     invoker: FusionModelInvoker,
+    run_id: str | None = None,
 ) -> Response:
-    provider = invoker.provider_for_model(str(payload.get("model") or ""))
+    model = str(payload.get("model") or "")
+    provider = invoker.provider_for_model(model)
     downstream_headers = dict(req.headers)
+    label = _fusion_call_label("synthesizer", model)
     if provider == "anthropic":
         return AnthropicAdapter().forward_payload(
-            payload, provider_path, downstream_headers
+            payload,
+            provider_path,
+            downstream_headers,
+            run_id=run_id,
+            phase="synthesizer",
+            label=label,
+            telemetry_provider="fusion",
+            upstream_provider="anthropic",
         )
-    return CodexAdapter().forward_payload(payload, provider_path, downstream_headers)
+    return CodexAdapter().forward_payload(
+        payload,
+        provider_path,
+        downstream_headers,
+        run_id=run_id,
+        phase="synthesizer",
+        label=label,
+        telemetry_provider="fusion",
+        upstream_provider="codex",
+    )
+
+
+def _fusion_call_label(phase: str, model: str) -> str:
+    role = {"synthesizer": "Synthesizer"}.get(phase, "Panel")
+    return f"{role} - {_friendly_fusion_model(model)}"
+
+
+def _friendly_fusion_model(model: str) -> str:
+    lowered = model.lower()
+    if "gpt55" in lowered or "gpt-5.5" in lowered or "gpt 5.5" in lowered:
+        return "GPT 5.5"
+    if "opus48" in lowered or "opus-4-8" in lowered or "opus 4.8" in lowered:
+        return "Opus 4.8"
+    return model
 
 
 def _panel_payload(
@@ -212,42 +220,15 @@ def _panel_payload(
     return out
 
 
-def _judge_payload(
-    payload: dict[str, Any],
-    *,
-    model: str,
-    panel_results: list[PanelResult],
-    max_tokens: int,
-) -> dict[str, Any]:
-    out = _text_only_chat_payload(payload)
-    out["model"] = model
-    out["messages"] = [
-        {"role": "system", "content": _JUDGE_SYSTEM},
-        {
-            "role": "user",
-            "content": (
-                "Original request context:\n\n"
-                f"{_conversation_text(payload)}\n\n"
-                "Panel responses:\n\n"
-                f"{_panel_results_text(panel_results)}"
-            ),
-        },
-    ]
-    _strip_tool_controls(out)
-    _apply_text_limits(out, max_tokens=max_tokens)
-    return out
-
-
-def _final_payload(
+def _synthesizer_payload(
     payload: dict[str, Any],
     *,
     profile: FusionModelProfile,
     panel_results: list[PanelResult],
-    judge_result: PanelResult | None,
 ) -> dict[str, Any]:
     out = deepcopy(payload)
-    out["model"] = profile.primary_model
-    synthesis = _fusion_synthesis(panel_results, judge_result)
+    out["model"] = profile.synthesizer_model
+    synthesis = _fusion_synthesis(panel_results)
     _prepend_system(out, synthesis)
     return out
 
@@ -274,7 +255,9 @@ def _text_only_messages(messages: Any) -> list[dict[str, str]]:
             role = "user"
         tool_calls = message.get("tool_calls")
         if isinstance(tool_calls, list) and tool_calls:
-            tool_text = "\n".join(_tool_call_text(tool_call) for tool_call in tool_calls)
+            tool_text = "\n".join(
+                _tool_call_text(tool_call) for tool_call in tool_calls
+            )
             content = "\n".join(part for part in (content, tool_text) if part)
         if content:
             out.append({"role": str(role), "content": content})
@@ -308,13 +291,6 @@ def _apply_text_limits(payload: dict[str, Any], *, max_tokens: int) -> None:
     payload.pop("stream_options", None)
 
 
-def _conversation_text(payload: dict[str, Any]) -> str:
-    lines: list[str] = []
-    for message in _text_only_messages(payload.get("messages")):
-        lines.append(f"{message['role']}: {message['content']}")
-    return "\n\n".join(lines)
-
-
 def _panel_results_text(panel_results: list[PanelResult]) -> str:
     if not panel_results:
         return "(no panel responses)"
@@ -323,21 +299,25 @@ def _panel_results_text(panel_results: list[PanelResult]) -> str:
         if result.ok:
             blocks.append(f"## {result.model}\n{result.text or '(empty response)'}")
         else:
-            blocks.append(f"## {result.model}\nERROR: {result.error or 'unknown error'}")
+            blocks.append(
+                f"## {result.model}\nERROR: {result.error or 'unknown error'}"
+            )
     return "\n\n".join(blocks)
 
 
-def _fusion_synthesis(
-    panel_results: list[PanelResult],
-    judge_result: PanelResult | None,
-) -> str:
+def _fusion_synthesis(panel_results: list[PanelResult]) -> str:
     parts = [
-        "You are the primary coding agent. A private multi-model Fusion panel ran before this turn.",
-        "Use the synthesis below as advisory context only. If it conflicts with the user, system, or tool results, prefer the higher-priority context.",
+        "You are the Fusion synthesizer. A private multi-model panel ran before this turn.",
+        (
+            "Use the panel context below as advisory context. If it conflicts "
+            "with the user, system, or tool results, prefer the higher-priority context."
+        ),
+        (
+            "You are the final Cursor-facing responder. Preserve normal tool use, "
+            "streaming behavior, and user-facing style."
+        ),
         "Do not mention the panel unless it is directly useful.",
     ]
-    if judge_result and judge_result.ok and judge_result.text:
-        parts.append(f"Judge synthesis:\n{judge_result.text}")
     parts.append(f"Panel details:\n{_panel_results_text(panel_results)}")
     return "\n\n".join(parts)
 

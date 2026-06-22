@@ -9,6 +9,7 @@ import requests
 from flask import Request, Response, jsonify, stream_with_context
 
 from ..common.logging import console
+from ..dashboard.telemetry import telemetry
 from .auth_state import AuthStateError, CodexAuthManager, CodexAuthStore
 from .request_adapter import CursorRequestAdapter, UnsupportedCursorShape
 from .response_adapter import adapt_responses_sse_to_chat_sse
@@ -43,6 +44,12 @@ class CodexAdapter:
         payload: dict[str, Any],
         provider_path: str,
         downstream_headers: dict[str, str],
+        *,
+        run_id: str | None = None,
+        phase: str | None = None,
+        label: str | None = None,
+        telemetry_provider: str = "codex",
+        upstream_provider: str | None = None,
     ) -> Response:
         """Forward an already-decoded payload to Codex."""
         try:
@@ -69,6 +76,17 @@ class CodexAdapter:
             thread_id=adapted.thread_id,
             downstream_headers=downstream_headers,
         )
+        telemetry_id = telemetry.record_request_start(
+            provider=telemetry_provider,
+            upstream_provider=upstream_provider,
+            model=str(adapted.body.get("model") or payload.get("model") or "unknown"),
+            operation="codex-request",
+            path=provider_path,
+            payload=payload,
+            phase=phase,
+            run_id=run_id,
+            label=label,
+        )
         try:
             upstream_response = post_responses(
                 self.settings.codex_responses_url,
@@ -93,6 +111,7 @@ class CodexAdapter:
                     timeout=self.settings.request_timeout_seconds,
                 )
         except requests.RequestException as exc:
+            telemetry.record_request_end(telemetry_id, status_code=502, error=str(exc))
             return (
                 jsonify(
                     {"error": {"message": f"Codex upstream request failed: {exc}"}}
@@ -100,7 +119,14 @@ class CodexAdapter:
                 502,
             )
         except AuthStateError as exc:
+            telemetry.record_request_end(telemetry_id, status_code=400, error=str(exc))
             return jsonify({"error": {"message": str(exc)}}), 400
+
+        telemetry.record_upstream_response(
+            telemetry_id,
+            status_code=upstream_response.status_code,
+            headers=upstream_response.headers,
+        )
 
         def stream_response():
             try:
@@ -113,9 +139,13 @@ class CodexAdapter:
                         chunks,
                         model=str(adapted.body.get("model", "")),
                         reasoning_display_mode=self.settings.reasoning_display_mode,
+                        telemetry_id=telemetry_id,
                     )
                 yield from chunks
             finally:
+                telemetry.record_request_end(
+                    telemetry_id, status_code=upstream_response.status_code
+                )
                 close = getattr(upstream_response, "close", None)
                 if callable(close):
                     close()

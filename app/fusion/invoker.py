@@ -17,12 +17,8 @@ from ..anthropic.auth_state import (
 from ..anthropic.openai_request_adapter import AnthropicOpenAIRequestAdapter
 from ..anthropic.request_adapter import UnsupportedAnthropicShape
 from ..anthropic.settings import AnthropicSettings
-from ..anthropic.upstream import (
-    build_upstream_headers as build_anthropic_headers,
-)
-from ..anthropic.upstream import (
-    post_messages as post_anthropic_messages,
-)
+from ..anthropic.upstream import build_upstream_headers as build_anthropic_headers
+from ..anthropic.upstream import post_messages as post_anthropic_messages
 from ..codex.auth_state import AuthStateError, CodexAuthManager, CodexAuthStore
 from ..codex.request_adapter import CursorRequestAdapter, UnsupportedCursorShape
 from ..codex.response_adapter import SSEDecoder
@@ -30,6 +26,7 @@ from ..codex.settings import CodexSettings
 from ..codex.upstream import build_upstream_headers as build_codex_headers
 from ..codex.upstream import post_responses as post_codex_responses
 from ..common.logging import console
+from ..dashboard.telemetry import telemetry
 from .settings import FusionSettings
 
 
@@ -80,25 +77,52 @@ class FusionModelInvoker:
         model: str,
         payload: dict[str, Any],
         downstream_headers: dict[str, str],
+        phase: str | None = None,
+        run_id: str | None = None,
+        label: str | None = None,
     ) -> PanelResult:
         """Invoke one model and return collected assistant text."""
+        provider = "unknown"
+        telemetry_id = ""
         try:
             provider = self.provider_for_model(model)
+            telemetry_id = telemetry.record_request_start(
+                provider="fusion",
+                upstream_provider=provider,
+                model=model,
+                operation="fusion-panel",
+                phase=phase or "panel",
+                run_id=run_id,
+                label=label,
+                payload=payload,
+            )
             if provider == "codex":
                 result = self._invoke_codex_text(
                     payload=payload,
                     downstream_headers=downstream_headers,
+                    telemetry_id=telemetry_id,
                 )
             else:
                 result = self._invoke_anthropic_text(
                     payload=payload,
                     downstream_headers=downstream_headers,
+                    telemetry_id=telemetry_id,
                 )
             _log_panel_usage(model=model, provider=provider, result=result)
             console.print(
                 "[bold cyan]FUSION PANEL:[/bold cyan] "
                 f"model={model} provider={provider} chars={len(result.text)}"
             )
+            if telemetry_id:
+                telemetry.record_usage(
+                    telemetry_id,
+                    provider="fusion",
+                    usage_provider=provider,
+                    model=model,
+                    usage=result.usage,
+                    stop_reason=result.stop_reason,
+                )
+                telemetry.record_request_end(telemetry_id, status_code=200)
             return PanelResult(
                 model=model,
                 ok=True,
@@ -107,13 +131,23 @@ class FusionModelInvoker:
                 usage=result.usage,
                 stop_reason=result.stop_reason,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: B902
             message = str(exc)
             console.print(
                 "[bold red]FUSION PANEL FAILED:[/bold red] "
                 f"model={model} error={message}"
             )
-            return PanelResult(model=model, ok=False, text="", error=message)
+            if telemetry_id:
+                telemetry.record_request_end(
+                    telemetry_id, status_code=502, error=message
+                )
+            return PanelResult(
+                model=model,
+                ok=False,
+                text="",
+                provider=provider if provider != "unknown" else None,
+                error=message,
+            )
 
     def provider_for_model(self, model: str) -> str:
         """Return the provider that can serve a model id."""
@@ -132,6 +166,7 @@ class FusionModelInvoker:
         *,
         payload: dict[str, Any],
         downstream_headers: dict[str, str],
+        telemetry_id: str = "",
     ) -> FusionTextResult:
         adapted = CursorRequestAdapter(self.codex_settings).adapt(
             "chat/completions", payload, downstream_headers
@@ -171,13 +206,25 @@ class FusionModelInvoker:
                     adapted.body,
                     timeout=self.fusion_settings.panel_timeout_seconds,
                 )
+            if telemetry_id:
+                telemetry.record_upstream_response(
+                    telemetry_id,
+                    status_code=response.status_code,
+                    headers=getattr(response, "headers", None),
+                )
             if response.status_code >= 400:
                 raise FusionInvocationError(
                     f"Codex upstream returned HTTP {response.status_code}: "
                     f"{_response_text(response)}"
                 )
-            return collect_codex_text(_response_chunks(response))
-        except (AuthStateError, UnsupportedCursorShape, requests.RequestException) as exc:
+            return collect_codex_text(
+                _response_chunks(response), telemetry_id=telemetry_id
+            )
+        except (
+            AuthStateError,
+            UnsupportedCursorShape,
+            requests.RequestException,
+        ) as exc:
             raise FusionInvocationError(str(exc)) from exc
         finally:
             close = locals().get("response")
@@ -189,6 +236,7 @@ class FusionModelInvoker:
         *,
         payload: dict[str, Any],
         downstream_headers: dict[str, str],
+        telemetry_id: str = "",
     ) -> FusionTextResult:
         adapted = AnthropicOpenAIRequestAdapter(self.anthropic_settings).adapt(
             "chat/completions", payload
@@ -226,12 +274,20 @@ class FusionModelInvoker:
                     adapted.body,
                     timeout=self.fusion_settings.panel_timeout_seconds,
                 )
+            if telemetry_id:
+                telemetry.record_upstream_response(
+                    telemetry_id,
+                    status_code=response.status_code,
+                    headers=getattr(response, "headers", None),
+                )
             if response.status_code >= 400:
                 raise FusionInvocationError(
                     f"Anthropic upstream returned HTTP {response.status_code}: "
                     f"{_response_text(response)}"
                 )
-            return collect_anthropic_text(_response_chunks(response))
+            return collect_anthropic_text(
+                _response_chunks(response), telemetry_id=telemetry_id
+            )
         except (
             AnthropicAuthStateError,
             UnsupportedAnthropicShape,
@@ -244,7 +300,9 @@ class FusionModelInvoker:
                 close.close()
 
 
-def collect_codex_text(chunks: Iterable[bytes]) -> FusionTextResult:
+def collect_codex_text(
+    chunks: Iterable[bytes], *, telemetry_id: str = ""
+) -> FusionTextResult:
     """Collect assistant text and usage from a Codex Responses SSE stream."""
     decoder = SSEDecoder()
     parts: list[str] = []
@@ -263,6 +321,15 @@ def collect_codex_text(chunks: Iterable[bytes]) -> FusionTextResult:
             delta = obj.get("delta")
             if isinstance(delta, str):
                 parts.append(delta)
+                if telemetry_id:
+                    telemetry.record_stream_delta(telemetry_id, text=delta)
+        elif event_name in {
+            "response.reasoning_text.delta",
+            "response.reasoning_summary_text.delta",
+        }:
+            delta = obj.get("delta")
+            if isinstance(delta, str) and telemetry_id:
+                telemetry.record_stream_delta(telemetry_id, reasoning=delta)
         elif event_name == "response.completed":
             response = obj.get("response")
             if isinstance(response, dict):
@@ -282,7 +349,9 @@ def collect_codex_text(chunks: Iterable[bytes]) -> FusionTextResult:
     )
 
 
-def collect_anthropic_text(chunks: Iterable[bytes]) -> FusionTextResult:
+def collect_anthropic_text(
+    chunks: Iterable[bytes], *, telemetry_id: str = ""
+) -> FusionTextResult:
     """Collect assistant text and usage from an Anthropic Messages SSE stream."""
     decoder = SSEDecoder()
     parts: list[str] = []
@@ -310,6 +379,12 @@ def collect_anthropic_text(chunks: Iterable[bytes]) -> FusionTextResult:
                 text = delta.get("text")
                 if isinstance(text, str):
                     parts.append(text)
+                    if telemetry_id:
+                        telemetry.record_stream_delta(telemetry_id, text=text)
+            elif isinstance(delta, dict) and delta.get("type") == "thinking_delta":
+                thinking = delta.get("thinking")
+                if isinstance(thinking, str) and telemetry_id:
+                    telemetry.record_stream_delta(telemetry_id, reasoning=thinking)
     return FusionTextResult(
         text="".join(parts).strip(),
         usage=usage or None,
@@ -362,9 +437,7 @@ def _merge_numeric_usage(target: dict[str, Any], usage: Any) -> None:
             target[key] = value
 
 
-def _log_panel_usage(
-    *, model: str, provider: str, result: FusionTextResult
-) -> None:
+def _log_panel_usage(*, model: str, provider: str, result: FusionTextResult) -> None:
     usage = result.usage
     if not isinstance(usage, dict):
         console.print(

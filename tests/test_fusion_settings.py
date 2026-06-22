@@ -11,24 +11,34 @@ from app.fusion.settings import (
 
 
 def test_fusion_model_profiles_can_be_configured():
-    """Fusion profiles define primary, panel, and optional judge models."""
+    """Fusion profiles define a synthesizer and private panel models."""
     profiles = parse_fusion_model_profiles(
-        "cp-fusion55:cp-gpt55-xfast:cp-gpt55-high|cp-opus48-xhigh:cp-gpt55-balanced",
+        "cp-fusion55:cp-opus48-xhigh:cp-gpt55-xhigh|cp-opus48-xhigh",
         supported_models={
-            "cp-gpt55-xfast",
-            "cp-gpt55-high",
+            "cp-gpt55-xhigh",
             "cp-opus48-xhigh",
-            "cp-gpt55-balanced",
         },
     )
 
     assert profiles == {
         "cp-fusion55": FusionModelProfile(
-            primary_model="cp-gpt55-xfast",
-            panel_models=("cp-gpt55-high", "cp-opus48-xhigh"),
-            judge_model="cp-gpt55-balanced",
+            synthesizer_model="cp-opus48-xhigh",
+            panel_models=("cp-gpt55-xhigh", "cp-opus48-xhigh"),
         )
     }
+
+
+def test_fusion_model_profiles_reject_legacy_four_call_shape():
+    """The retired fourth call field should not be accepted silently."""
+    with pytest.raises(ServiceConfigurationError, match="alias:synthesizer"):
+        parse_fusion_model_profiles(
+            "cp-fusion55:cp-opus48-xhigh:cp-gpt55-xhigh|cp-opus48-xhigh:cp-gpt55-balanced",
+            supported_models={
+                "cp-gpt55-xhigh",
+                "cp-opus48-xhigh",
+                "cp-gpt55-balanced",
+            },
+        )
 
 
 def test_fusion_model_profiles_reject_unknown_models():
@@ -55,8 +65,8 @@ def test_fusion_model_payload_includes_aliases():
     class Settings:
         model_profiles = {
             "cp-fusion55": FusionModelProfile(
-                primary_model="cp-gpt55-xfast",
-                panel_models=("cp-gpt55-high", "cp-opus48-xhigh"),
+                synthesizer_model="cp-opus48-xhigh",
+                panel_models=("cp-gpt55-xhigh", "cp-opus48-xhigh"),
             )
         }
 

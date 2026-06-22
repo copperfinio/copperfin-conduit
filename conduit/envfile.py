@@ -31,7 +31,7 @@ DEFAULT_ANTHROPIC_MODEL_PROFILES = (
     "cp-opus48-xfast:claude-opus-4-8:xhigh:65536:fast"
 )
 DEFAULT_FUSION_MODEL_PROFILES = (
-    "cp-fusion55:cp-gpt55-xfast:cp-gpt55-high|cp-opus48-xhigh:cp-gpt55-balanced,"
+    "cp-fusion55:cp-opus48-xhigh:cp-gpt55-xhigh|cp-opus48-xhigh,"
     "cp-fusion55-fast:cp-gpt55-fast:cp-gpt55-balanced|cp-opus48-high"
 )
 
@@ -51,6 +51,7 @@ LOG_CONTEXT=off
 LOG_COMPLETION=on
 RECORD_TRAFFIC=off
 REASONING_DISPLAY_MODE=none
+DASHBOARD_PORT=20130
 
 SERVICE_API_KEY={key}
 

@@ -9,6 +9,7 @@ import requests
 from flask import Request, Response, jsonify, stream_with_context
 
 from ..common.logging import console
+from ..dashboard.telemetry import telemetry
 from .auth_state import (
     AnthropicAuthManager,
     AnthropicAuthStateError,
@@ -49,6 +50,12 @@ class AnthropicAdapter:
         payload: dict[str, Any],
         provider_path: str,
         downstream_headers: dict[str, str],
+        *,
+        run_id: str | None = None,
+        phase: str | None = None,
+        label: str | None = None,
+        telemetry_provider: str = "anthropic",
+        upstream_provider: str | None = None,
     ) -> Response:
         """Forward an already-decoded payload to Anthropic."""
         chat_response = _wants_chat_completion_response(provider_path)
@@ -80,6 +87,17 @@ class AnthropicAdapter:
             downstream_headers=downstream_headers,
             fast_mode=adapted.body.get("speed") == "fast",
         )
+        telemetry_id = telemetry.record_request_start(
+            provider=telemetry_provider,
+            upstream_provider=upstream_provider,
+            model=adapted.upstream_model or str(payload.get("model") or "unknown"),
+            operation="anthropic-chat" if chat_response else "anthropic-messages",
+            path=provider_path,
+            payload=payload,
+            phase=phase,
+            run_id=run_id,
+            label=label,
+        )
         try:
             upstream_response = post_messages(
                 self.settings.messages_url,
@@ -103,6 +121,7 @@ class AnthropicAdapter:
                     timeout=self.settings.request_timeout_seconds,
                 )
         except requests.RequestException as exc:
+            telemetry.record_request_end(telemetry_id, status_code=502, error=str(exc))
             return (
                 jsonify(
                     {"error": {"message": f"Anthropic upstream request failed: {exc}"}}
@@ -110,7 +129,14 @@ class AnthropicAdapter:
                 502,
             )
         except AnthropicAuthStateError as exc:
+            telemetry.record_request_end(telemetry_id, status_code=400, error=str(exc))
             return jsonify({"error": {"message": str(exc)}}), 400
+
+        telemetry.record_upstream_response(
+            telemetry_id,
+            status_code=upstream_response.status_code,
+            headers=upstream_response.headers,
+        )
 
         def stream_response():
             try:
@@ -118,17 +144,24 @@ class AnthropicAdapter:
                 content_type = upstream_response.headers.get("content-type", "")
                 if chat_response and upstream_response.status_code == 200:
                     chunks = adapt_anthropic_sse_to_chat_sse(
-                        chunks, model=adapted.upstream_model
+                        chunks,
+                        model=adapted.upstream_model,
+                        telemetry_id=telemetry_id,
                     )
                 elif (
                     upstream_response.status_code == 200
                     and "text/event-stream" in content_type
                 ):
                     chunks = log_anthropic_sse_usage(
-                        chunks, model=adapted.upstream_model
+                        chunks,
+                        model=adapted.upstream_model,
+                        telemetry_id=telemetry_id,
                     )
                 yield from chunks
             finally:
+                telemetry.record_request_end(
+                    telemetry_id, status_code=upstream_response.status_code
+                )
                 close = getattr(upstream_response, "close", None)
                 if callable(close):
                     close()

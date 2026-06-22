@@ -28,7 +28,7 @@ def test_codex_model_list_includes_fusion_aliases(testapp):
     """The OpenAI-compatible model list exposes Fusion aliases for Cursor."""
     testapp.app.config["FUSION_MODEL_PROFILES"] = {
         "cp-fusion55": FusionModelProfile(
-            primary_model="codex-test-model",
+            synthesizer_model="codex-test-model",
             panel_models=("codex-test-model", "claude-opus-4-8"),
         )
     }
@@ -48,7 +48,7 @@ def test_codex_path_routes_fusion_alias_before_provider_dispatch(testapp, monkey
     captured = {}
     testapp.app.config["FUSION_MODEL_PROFILES"] = {
         "cp-fusion55": FusionModelProfile(
-            primary_model="codex-test-model",
+            synthesizer_model="codex-test-model",
             panel_models=("codex-test-model", "claude-opus-4-8"),
         )
     }

@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Conduit Live Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('dashboard.static', filename='dashboard.css') }}" />
+  </head>
+  <body>
+    <div class="grain"></div>
+
+    <main class="app-shell">
+      <aside class="icon-rail" aria-label="Dashboard navigation">
+        <div class="app-mark" aria-label="Conduit">C</div>
+        <nav class="rail-nav" aria-label="Dashboard sections">
+          <a class="rail-item active" href="#overview" title="Overview">01</a>
+          <a class="rail-item" href="#providers" title="Providers">02</a>
+          <a class="rail-item" href="#review" title="Ops review">03</a>
+          <a class="rail-item" href="#fusion" title="Fusion">04</a>
+          <a class="rail-item" href="#requests" title="Requests">05</a>
+        </nav>
+      </aside>
+
+      <aside class="menu-rail" aria-label="Dashboard menu">
+        <div class="workspace-switcher">
+          <strong>Conduit</strong>
+          <span>Cursor proxy</span>
+        </div>
+        <div class="environment-chip">
+          <span class="status-dot" aria-hidden="true"></span>
+          local
+        </div>
+
+        <nav class="menu-section" aria-label="Operations">
+          <p class="menu-label">Operations</p>
+          <a href="#overview" class="menu-link active"><span>01</span>Overview</a>
+          <a href="#providers" class="menu-link"><span>02</span>Providers</a>
+          <a href="#review" class="menu-link"><span>!</span>Ops review</a>
+          <a href="#fusion" class="menu-link"><span>04</span>Fusion runs</a>
+        </nav>
+
+        <nav class="menu-section" aria-label="Observability">
+          <p class="menu-label">Observability</p>
+          <a href="#requests" class="menu-link"><span>05</span>Requests</a>
+          <a href="#routes" class="menu-link"><span>06</span>Route matrix</a>
+          <a href="#content" class="menu-link"><span>07</span>Content</a>
+          <a href="#rates" class="menu-link"><span>08</span>Rate limits</a>
+        </nav>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="kicker">Conduit local telemetry</p>
+            <h1>Live model traffic</h1>
+            <p class="subhead">
+              In-process metrics for this localhost proxy instance. Redacted by default; useful by accident.
+            </p>
+          </div>
+          <div class="topbar-actions">
+            <label class="field-control">
+              <span>Window</span>
+              <select id="window-select" aria-label="Telemetry time window">
+                <option value="all">Session</option>
+                <option value="300">5 minutes</option>
+                <option value="900">15 minutes</option>
+                <option value="3600">1 hour</option>
+                <option value="10800">3 hours</option>
+              </select>
+            </label>
+            <label class="field-control">
+              <span>Group by</span>
+              <select id="group-select" aria-label="Telemetry grouping">
+                <option value="provider">Provider</option>
+                <option value="upstream">Upstream</option>
+                <option value="model">Model</option>
+                <option value="phase">Phase</option>
+              </select>
+            </label>
+            <div class="status-chip" aria-live="polite">
+              <span class="status-dot" id="connection-orb" aria-hidden="true"></span>
+              <span id="connection-status">Connecting</span>
+            </div>
+            <button class="icon-action" id="reset-button" type="button" title="Reset session" aria-label="Reset session">
+              <span aria-hidden="true">R</span>
+            </button>
+          </div>
+        </header>
+
+        <section id="overview" class="metric-grid" aria-label="Global telemetry summary">
+          <article class="metric-card accent-cyan">
+            <div class="metric-label">Requests</div>
+            <strong id="metric-requests">0</strong>
+            <small id="metric-active">0 active</small>
+          </article>
+          <article class="metric-card accent-green">
+            <div class="metric-label">Token burn</div>
+            <strong id="metric-tokens">0</strong>
+            <small id="metric-token-split">0 in - 0 out</small>
+          </article>
+          <article class="metric-card accent-orange">
+            <div class="metric-label">Cache hit ratio</div>
+            <strong id="metric-cache">0%</strong>
+            <small id="metric-cache-detail">0 cached tokens</small>
+          </article>
+          <article class="metric-card accent-purple">
+            <div class="metric-label">Spend</div>
+            <strong id="metric-spend">Unknown</strong>
+            <small>No pricing table configured</small>
+          </article>
+          <article class="metric-card accent-red">
+            <div class="metric-label">Latency p95</div>
+            <strong id="metric-latency">0ms</strong>
+            <small id="metric-latency-detail">No completed calls</small>
+          </article>
+        </section>
+
+        <section class="panel provider-posture-panel" aria-label="Provider posture">
+          <div class="panel-heading">
+            <div>
+              <p class="kicker">Upstream posture</p>
+              <h2>Provider command board</h2>
+            </div>
+            <span class="outline-pill" id="posture-window">session</span>
+          </div>
+          <div class="list-table posture-table" id="provider-posture"></div>
+        </section>
+
+        <section class="panel provider-runway-panel" aria-label="Provider runway">
+          <div class="panel-heading">
+            <div>
+              <p class="kicker">Runway</p>
+              <h2>Provider trend and headroom</h2>
+            </div>
+            <span class="outline-pill" id="runway-window">session</span>
+          </div>
+          <div class="provider-runway-grid" id="provider-runway"></div>
+        </section>
+
+        <section class="panel provider-readiness-panel" aria-label="Provider readiness">
+          <div class="panel-heading">
+            <div>
+              <p class="kicker">Readiness</p>
+              <h2>Provider auth and route readiness</h2>
+            </div>
+            <span class="outline-pill" id="readiness-window">session</span>
+          </div>
+          <div class="provider-readiness-grid" id="provider-readiness"></div>
+        </section>
+
+        <section class="main-grid">
+          <section id="providers" class="providers-grid" aria-label="Provider panels">
+            <article class="provider-card panel provider-codex" data-provider="codex">
+              <div class="panel-heading">
+                <div>
+                  <p class="kicker">GPT panel</p>
+                  <h2>GPT / Codex</h2>
+                </div>
+                <span class="mini-led"></span>
+              </div>
+              <div class="provider-stats" id="provider-codex"></div>
+              <canvas class="sparkline" id="spark-codex" height="74"></canvas>
+            </article>
+
+            <article class="provider-card panel provider-anthropic" data-provider="anthropic">
+              <div class="panel-heading">
+                <div>
+                  <p class="kicker">Claude panel</p>
+                  <h2>Claude / Anthropic</h2>
+                </div>
+                <span class="mini-led"></span>
+              </div>
+              <div class="provider-stats" id="provider-anthropic"></div>
+              <canvas class="sparkline" id="spark-anthropic" height="74"></canvas>
+            </article>
+
+            <article class="provider-card panel provider-azure" data-provider="azure">
+              <div class="panel-heading">
+                <div>
+                  <p class="kicker">Azure panel</p>
+                  <h2>Azure GPT</h2>
+                </div>
+                <span class="mini-led"></span>
+              </div>
+              <div class="provider-stats" id="provider-azure"></div>
+              <canvas class="sparkline" id="spark-azure" height="74"></canvas>
+            </article>
+
+            <article class="provider-card panel provider-fusion" data-provider="fusion">
+              <div class="panel-heading">
+                <div>
+                  <p class="kicker">Council panel</p>
+                  <h2>Fusion internals</h2>
+                </div>
+                <span class="mini-led"></span>
+              </div>
+              <div class="provider-stats" id="provider-fusion"></div>
+              <canvas class="sparkline" id="spark-fusion" height="74"></canvas>
+            </article>
+          </section>
+
+          <aside class="side-stack">
+            <article id="review" class="panel ops-review-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="kicker">Ops review</p>
+                  <h2>What needs attention</h2>
+                </div>
+                <button class="ghost-button" id="ops-review-button" type="button">Analyze</button>
+              </div>
+              <div class="ops-score">
+                <strong id="ops-score">--</strong>
+                <span>
+                  <b id="ops-headline">Waiting for telemetry.</b>
+                  <small id="ops-summary">No model traffic has been reviewed yet.</small>
+                </span>
+              </div>
+              <div class="ops-signals" id="ops-signals"></div>
+              <div class="ops-risk-summary" id="ops-risk-summary"></div>
+              <div class="ops-actions" id="ops-actions"></div>
+              <div class="ops-fix-queue" id="ops-fix-queue"></div>
+              <div class="ops-provider-posture" id="ops-provider-posture"></div>
+              <div class="ops-findings" id="ops-findings"></div>
+            </article>
+
+            <article class="panel chart-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="kicker">Throughput</p>
+                  <h2>Token volume</h2>
+                </div>
+                <div class="panel-tools">
+                  <span class="panel-meta" id="chart-window">session</span>
+                  <div class="chart-mode-control" data-chart-key="token" aria-label="Token chart mode">
+                    <button class="chart-mode-button" data-chart-mode="area" type="button" title="Area" aria-label="Area chart"><span class="mode-icon mode-area"></span></button>
+                    <button class="chart-mode-button" data-chart-mode="line" type="button" title="Line" aria-label="Line chart"><span class="mode-icon mode-line"></span></button>
+                    <button class="chart-mode-button" data-chart-mode="bar" type="button" title="Bar" aria-label="Bar chart"><span class="mode-icon mode-bar"></span></button>
+                  </div>
+                </div>
+              </div>
+              <div class="chart-wrap">
+                <canvas id="token-chart" height="250"></canvas>
+                <div class="chart-tooltip" id="token-tooltip" hidden></div>
+              </div>
+              <div class="chart-legend" id="token-legend"></div>
+            </article>
+
+            <article id="rates" class="panel rate-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="kicker">Upstream headers</p>
+                  <h2>Rate limits</h2>
+                </div>
+              </div>
+              <div id="rate-limits" class="rate-list"></div>
+              <p class="fine-print" id="rate-note">Only shown when upstream headers expose them.</p>
+            </article>
+          </aside>
+        </section>
+
+        <section class="chart-matrix" aria-label="Operational charts">
+          <article class="panel chart-panel compact-chart">
+              <div class="panel-heading">
+                <div>
+                  <p class="kicker">Traffic</p>
+                  <h2>Requests and errors</h2>
+                </div>
+                <div class="panel-tools">
+                  <span class="panel-meta">per call</span>
+                  <div class="chart-mode-control" data-chart-key="traffic" aria-label="Traffic chart mode">
+                    <button class="chart-mode-button" data-chart-mode="area" type="button" title="Area" aria-label="Area chart"><span class="mode-icon mode-area"></span></button>
+                    <button class="chart-mode-button" data-chart-mode="line" type="button" title="Line" aria-label="Line chart"><span class="mode-icon mode-line"></span></button>
+                    <button class="chart-mode-button" data-chart-mode="bar" type="button" title="Bar" aria-label="Bar chart"><span class="mode-icon mode-bar"></span></button>
+                  </div>
+                </div>
+              </div>
+              <div class="chart-wrap">
+                <canvas id="traffic-chart" height="190"></canvas>
+                <div class="chart-tooltip" id="traffic-tooltip" hidden></div>
+            </div>
+            <div class="chart-legend" id="traffic-legend"></div>
+          </article>
+
+          <article class="panel chart-panel compact-chart">
+              <div class="panel-heading">
+                <div>
+                  <p class="kicker">Latency</p>
+                  <h2>Provider response time</h2>
+                </div>
+                <div class="panel-tools">
+                  <span class="panel-meta">ms</span>
+                  <div class="chart-mode-control" data-chart-key="latency" aria-label="Latency chart mode">
+                    <button class="chart-mode-button" data-chart-mode="area" type="button" title="Area" aria-label="Area chart"><span class="mode-icon mode-area"></span></button>
+                    <button class="chart-mode-button" data-chart-mode="line" type="button" title="Line" aria-label="Line chart"><span class="mode-icon mode-line"></span></button>
+                    <button class="chart-mode-button" data-chart-mode="bar" type="button" title="Bar" aria-label="Bar chart"><span class="mode-icon mode-bar"></span></button>
+                  </div>
+                </div>
+              </div>
+              <div class="chart-wrap">
+                <canvas id="latency-chart" height="190"></canvas>
+                <div class="chart-tooltip" id="latency-tooltip" hidden></div>
+            </div>
+            <div class="chart-legend" id="latency-legend"></div>
+          </article>
+
+          <article class="panel chart-panel compact-chart">
+              <div class="panel-heading">
+                <div>
+                  <p class="kicker">Usage shape</p>
+                  <h2>Input, output, and cache</h2>
+                </div>
+                <div class="panel-tools">
+                  <span class="panel-meta">tokens</span>
+                  <div class="chart-mode-control" data-chart-key="cache" aria-label="Usage chart mode">
+                    <button class="chart-mode-button" data-chart-mode="area" type="button" title="Area" aria-label="Area chart"><span class="mode-icon mode-area"></span></button>
+                    <button class="chart-mode-button" data-chart-mode="line" type="button" title="Line" aria-label="Line chart"><span class="mode-icon mode-line"></span></button>
+                    <button class="chart-mode-button" data-chart-mode="bar" type="button" title="Bar" aria-label="Bar chart"><span class="mode-icon mode-bar"></span></button>
+                  </div>
+                </div>
+              </div>
+              <div class="chart-wrap">
+                <canvas id="cache-chart" height="190"></canvas>
+                <div class="chart-tooltip" id="cache-tooltip" hidden></div>
+            </div>
+            <div class="chart-legend" id="cache-legend"></div>
+          </article>
+
+          <article class="panel chart-panel compact-chart">
+              <div class="panel-heading">
+                <div>
+                  <p class="kicker">Fusion</p>
+                  <h2>Panel vs synthesizer latency</h2>
+                </div>
+                <div class="panel-tools">
+                  <span class="panel-meta">ms</span>
+                  <div class="chart-mode-control" data-chart-key="phase" aria-label="Fusion phase chart mode">
+                    <button class="chart-mode-button" data-chart-mode="area" type="button" title="Area" aria-label="Area chart"><span class="mode-icon mode-area"></span></button>
+                    <button class="chart-mode-button" data-chart-mode="line" type="button" title="Line" aria-label="Line chart"><span class="mode-icon mode-line"></span></button>
+                    <button class="chart-mode-button" data-chart-mode="bar" type="button" title="Bar" aria-label="Bar chart"><span class="mode-icon mode-bar"></span></button>
+                  </div>
+                </div>
+              </div>
+              <div class="chart-wrap">
+                <canvas id="phase-chart" height="190"></canvas>
+                <div class="chart-tooltip" id="phase-tooltip" hidden></div>
+            </div>
+            <div class="chart-legend" id="phase-legend"></div>
+          </article>
+
+          <article class="panel chart-panel compact-chart">
+              <div class="panel-heading">
+                <div>
+                  <p class="kicker">Efficiency</p>
+                  <h2>Cache yield vs latency</h2>
+                </div>
+                <span class="panel-meta">cache hit ratio / ms</span>
+              </div>
+              <div class="chart-wrap">
+                <canvas id="efficiency-chart" height="190"></canvas>
+                <div class="chart-tooltip" id="efficiency-tooltip" hidden></div>
+            </div>
+            <div class="chart-legend" id="efficiency-legend"></div>
+          </article>
+        </section>
+
+        <section class="panel traffic-heatmap-panel" aria-label="Provider traffic heatmap">
+          <div class="panel-heading">
+            <div>
+              <p class="kicker">Traffic heatmap</p>
+              <h2>Provider pressure over time</h2>
+            </div>
+            <span class="outline-pill" id="heatmap-window">session</span>
+          </div>
+          <div class="heatmap-summary" id="heatmap-summary"></div>
+          <div class="traffic-heatmap" id="traffic-heatmap"></div>
+        </section>
+
+        <section class="panel group-pressure-panel" aria-label="Grouped traffic pressure">
+          <div class="panel-heading">
+            <div>
+              <p class="kicker">Traffic lens</p>
+              <h2 id="group-title">Grouped pressure</h2>
+            </div>
+            <span class="outline-pill" id="group-meta">provider</span>
+          </div>
+          <div class="group-pressure-layout">
+            <div class="chart-wrap group-chart-wrap">
+              <canvas id="group-chart" height="230"></canvas>
+            </div>
+            <div class="list-table group-pressure-table" id="group-pressure"></div>
+          </div>
+        </section>
+
+        <section class="operator-grid" aria-label="Operator drilldowns">
+          <article class="panel model-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="kicker">Model rank</p>
+                <h2>Performance by model</h2>
+              </div>
+              <span class="panel-meta">completed rows</span>
+            </div>
+            <div class="list-table model-table" id="model-leaderboard"></div>
+          </article>
+
+          <article class="panel error-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="kicker">Trouble queue</p>
+                <h2>Errors and slow calls</h2>
+              </div>
+              <span class="outline-pill red">inspect</span>
+            </div>
+            <div class="list-table" id="issue-queue"></div>
+          </article>
+        </section>
+
+        <section class="operator-grid ops-distribution-grid" aria-label="Latency and failure distribution">
+          <article class="panel chart-panel latency-distribution-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="kicker">Latency shape</p>
+                <h2>Response time distribution</h2>
+              </div>
+              <span class="outline-pill" id="latency-bands-window">session</span>
+            </div>
+            <div class="latency-band-summary" id="latency-band-summary"></div>
+            <div class="chart-wrap">
+              <canvas id="latency-bands-chart" height="220"></canvas>
+              <div class="chart-tooltip" id="latency-bands-tooltip" hidden></div>
+            </div>
+            <div class="chart-legend" id="latency-bands-legend"></div>
+          </article>
+
+          <article class="panel failure-taxonomy-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="kicker">Failure taxonomy</p>
+                <h2>What broke, grouped by route</h2>
+              </div>
+              <span class="outline-pill red" id="failure-taxonomy-count">0 groups</span>
+            </div>
+            <div class="list-table failure-taxonomy-table" id="failure-taxonomy"></div>
+          </article>
+        </section>
+
+        <section class="panel failure-fingerprint-panel" aria-label="Failure fingerprints">
+          <div class="panel-heading">
+            <div>
+              <p class="kicker">Incidents</p>
+              <h2>Failure fingerprints</h2>
+            </div>
+            <span class="outline-pill red" id="fingerprint-window">session</span>
+          </div>
+          <div class="fingerprint-summary" id="fingerprint-summary"></div>
+          <div class="list-table fingerprint-table" id="failure-fingerprints"></div>
+        </section>
+
+        <section class="panel contention-panel" aria-label="Route contention map">
+          <div class="panel-heading">
+            <div>
+              <p class="kicker">Operator map</p>
+              <h2>Hot routes and waste</h2>
+            </div>
+            <span class="outline-pill" id="contention-window">session</span>
+          </div>
+          <div class="contention-layout">
+            <div class="list-table contention-table" id="contention-map"></div>
+            <aside class="contention-actions" id="contention-actions"></aside>
+          </div>
+        </section>
+
+        <section id="routes" class="panel route-matrix-panel" aria-label="Provider and model route matrix">
+          <div class="panel-heading">
+            <div>
+              <p class="kicker">Routing matrix</p>
+              <h2>Provider, upstream, model, and phase spread</h2>
+            </div>
+            <span class="outline-pill">live + recent</span>
+          </div>
+          <div class="list-table route-table" id="route-matrix"></div>
+        </section>
+
+        <section class="panel route-slo-panel" aria-label="Route SLO breach board">
+          <div class="panel-heading">
+            <div>
+              <p class="kicker">Guardrails</p>
+              <h2>Route SLO breach board</h2>
+            </div>
+            <span class="outline-pill" id="slo-window">session</span>
+          </div>
+          <div class="route-slo-summary" id="route-slo-summary"></div>
+          <div class="list-table route-slo-table" id="route-slo-board"></div>
+        </section>
+
+        <section class="panel execution-timeline-panel" aria-label="Request execution timeline">
+          <div class="panel-heading">
+            <div>
+              <p class="kicker">Execution lanes</p>
+              <h2>Request timeline</h2>
+            </div>
+            <span class="outline-pill" id="timeline-window">session</span>
+          </div>
+          <div class="execution-timeline" id="execution-timeline"></div>
+        </section>
+
+        <section class="panel stream-shape-panel" aria-label="Streaming shape">
+          <div class="panel-heading">
+            <div>
+              <p class="kicker">Stream cadence</p>
+              <h2>Chunk flow and brick risk</h2>
+            </div>
+            <span class="outline-pill" id="stream-window">session</span>
+          </div>
+          <div class="stream-summary-grid" id="stream-summary"></div>
+          <div class="list-table stream-table" id="stream-shape"></div>
+        </section>
+
+        <section id="fusion" class="panel fusion-runs-panel" aria-label="Fusion run breakdown">
+          <div class="panel-heading">
+            <div>
+              <p class="kicker">Council trace</p>
+              <h2>Fusion runs</h2>
+            </div>
+            <span class="outline-pill">panel - synthesizer</span>
+          </div>
+          <div class="fusion-runs" id="fusion-runs"></div>
+        </section>
+
+        <section id="requests" class="lower-grid">
+          <article class="panel active-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="kicker">Now</p>
+                <h2>Active requests</h2>
+              </div>
+            </div>
+            <div class="request-list" id="active-requests"></div>
+          </article>
+
+          <article id="content" class="panel content-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="kicker">Current content</p>
+                <h2>Redacted previews</h2>
+              </div>
+              <span class="outline-pill green">redacted</span>
+            </div>
+            <div class="content-feed" id="content-feed"></div>
+          </article>
+
+          <article class="panel recent-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="kicker">Recent</p>
+                <h2>Completed calls</h2>
+              </div>
+            </div>
+            <div class="request-list" id="recent-requests"></div>
+          </article>
+        </section>
+
+        <footer class="footer-note">
+          <span id="last-updated">Waiting for first snapshot.</span>
+          <span id="scope-note">In-process metrics for one service instance.</span>
+        </footer>
+      </section>
+    </main>
+
+    <script src="{{ url_for('dashboard.static', filename='dashboard.js') }}" defer></script>
+  </body>
+</html>

@@ -16,6 +16,7 @@ from rich.live import Live
 
 from ..common.logging import console, create_message_panel
 from ..common.sse import chunks_to_sse, sse_to_events
+from ..dashboard.telemetry import telemetry
 from ..exceptions import ClientClosedConnection
 from ..reasoning_display import (
     parse_reasoning_display_mode,
@@ -76,10 +77,12 @@ class ResponseAdapter:
     _reasoning_display_mode: str
     _tool_calls: int
     _usage: Optional[Dict[str, Any]]
+    _telemetry_id: str
 
     def __init__(self, adapter: Any) -> None:
         """Initialize the adapter with a reference to the AzureAdapter."""
         self.adapter = adapter  # AzureAdapter instance for shared config/env
+        self._telemetry_id = ""
 
     # ---- Helpers ----
     @staticmethod
@@ -324,6 +327,10 @@ class ResponseAdapter:
     ) -> Optional[Dict[str, Any]]:
         """Handle response.function_call.arguments.delta events."""
         arguments_delta = obj.get("delta", "") if isinstance(obj, dict) else ""
+        if arguments_delta and self._telemetry_id:
+            telemetry.record_stream_delta(
+                self._telemetry_id, tool_delta=arguments_delta
+            )
         return self._build_completion_chunk(
             delta={
                 "tool_calls": [
@@ -340,6 +347,8 @@ class ResponseAdapter:
     ) -> Optional[Dict[str, Any]]:
         """Handle response.custom_tool_call_input.delta events (streaming tool arguments)."""
         input_delta = obj.get("delta", "") if isinstance(obj, dict) else ""
+        if input_delta and self._telemetry_id:
+            telemetry.record_stream_delta(self._telemetry_id, tool_delta=input_delta)
         return self._build_completion_chunk(
             delta={
                 "tool_calls": [
@@ -374,16 +383,21 @@ class ResponseAdapter:
         self, obj: Optional[Dict[str, Any]]
     ) -> Optional[Dict[str, Any]]:
         """Handle response.refusal.delta — model is refusing the request."""
+        text = obj.get("delta", "") if isinstance(obj, dict) else ""
+        if text and self._telemetry_id:
+            telemetry.record_stream_delta(self._telemetry_id, text=str(text))
         return self._build_completion_chunk(
             delta={
                 "role": "assistant",
-                "content": (obj.get("delta", "") if isinstance(obj, dict) else ""),
+                "content": text,
             }
         )
 
     def _build_reasoning_chunk(self, obj: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Build a Chat Completions chunk with Cursor-native reasoning content."""
         delta = obj.get("delta", "") if isinstance(obj, dict) else ""
+        if delta and self._telemetry_id:
+            telemetry.record_stream_delta(self._telemetry_id, reasoning=str(delta))
         return self._build_completion_chunk(
             delta=reasoning_content_delta(delta, self._reasoning_display_mode)
         )
@@ -415,6 +429,10 @@ class ResponseAdapter:
     ) -> Optional[Dict[str, Any]]:
         """Handle response.mcp_call_arguments.delta — streaming MCP tool args."""
         arguments_delta = obj.get("delta", "") if isinstance(obj, dict) else ""
+        if arguments_delta and self._telemetry_id:
+            telemetry.record_stream_delta(
+                self._telemetry_id, tool_delta=arguments_delta
+            )
         return self._build_completion_chunk(
             delta={
                 "tool_calls": [
@@ -460,10 +478,13 @@ class ResponseAdapter:
     ) -> Optional[Dict[str, Any]]:
         """Handle response.code_interpreter_call_code.delta — streaming code."""
         # Emit as text content so the user sees the code being generated
+        text = obj.get("delta", "") if isinstance(obj, dict) else ""
+        if text and self._telemetry_id:
+            telemetry.record_stream_delta(self._telemetry_id, text=str(text))
         return self._build_completion_chunk(
             delta={
                 "role": "assistant",
-                "content": (obj.get("delta", "") if isinstance(obj, dict) else ""),
+                "content": text,
             }
         )
 
@@ -477,10 +498,13 @@ class ResponseAdapter:
         self, obj: Optional[Dict[str, Any]]
     ) -> Optional[Dict[str, Any]]:
         """Handle response.audio.transcript.delta — audio transcript text."""
+        text = obj.get("delta", "") if isinstance(obj, dict) else ""
+        if text and self._telemetry_id:
+            telemetry.record_stream_delta(self._telemetry_id, text=str(text))
         return self._build_completion_chunk(
             delta={
                 "role": "assistant",
-                "content": (obj.get("delta", "") if isinstance(obj, dict) else ""),
+                "content": text,
             }
         )
 
@@ -500,10 +524,13 @@ class ResponseAdapter:
         self, obj: Optional[Dict[str, Any]]
     ) -> Optional[Dict[str, Any]]:
         """Handle response.output_text.delta events and emit text chunk."""
+        text = obj.get("delta", "") if isinstance(obj, dict) else ""
+        if text and self._telemetry_id:
+            telemetry.record_stream_delta(self._telemetry_id, text=str(text))
         return self._build_completion_chunk(
             delta={
                 "role": "assistant",
-                "content": (obj.get("delta", "") if isinstance(obj, dict) else ""),
+                "content": text,
             }
         )
 
@@ -539,6 +566,14 @@ class ResponseAdapter:
                 f"output={output_tokens} (reasoning={reasoning_tokens}) "
                 f"total={total_tokens}"
             )
+            if self._telemetry_id:
+                telemetry.record_usage(
+                    self._telemetry_id,
+                    provider="azure",
+                    model=str(self.adapter.inbound_model or "unknown"),
+                    usage=usage,
+                    stop_reason="completed",
+                )
         return None
 
     def _incomplete(self, obj: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -580,8 +615,9 @@ class ResponseAdapter:
             }
         )
 
-    def adapt(self, upstream_resp: Any) -> Response:
+    def adapt(self, upstream_resp: Any, *, telemetry_id: str = "") -> Response:
         """Adapt an upstream Azure streaming response into SSE for Flask."""
+        self._telemetry_id = telemetry_id
 
         @stream_with_context
         def generate() -> Iterable[bytes]:
@@ -714,15 +750,26 @@ class ResponseAdapter:
                     if current_app.config["LOG_COMPLETION"]:
                         live.update(create_message_panel(completion_msg, 1, 1))
 
+            disconnected = False
             try:
                 yield from chunks_to_sse(gen_dicts())
             except GeneratorExit:
                 # Downstream client closed the connection mid-stream
                 # Translate to a clearer exception; upstream will be closed in finally
+                disconnected = True
                 raise ClientClosedConnection(
                     "Client closed connection during streaming response"
                 ) from None
             finally:
+                if self._telemetry_id:
+                    telemetry.record_request_end(
+                        self._telemetry_id,
+                        status_code=(
+                            499
+                            if disconnected
+                            else getattr(upstream_resp, "status_code", 200)
+                        ),
+                    )
                 upstream_resp.close()
 
         headers = {}

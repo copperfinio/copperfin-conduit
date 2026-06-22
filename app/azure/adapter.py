@@ -11,6 +11,7 @@ from flask import Request, Response
 
 from ..common.logging import console
 from ..common.recording import record_payload
+from ..dashboard.telemetry import telemetry
 
 # Local adapters
 from .request_adapter import RequestAdapter
@@ -53,12 +54,35 @@ class AzureAdapter:
         except OSError as exc:
             console.print(f"[yellow]Recording failed (non-fatal): {exc}[/yellow]")
 
+        telemetry_id = telemetry.record_request_start(
+            provider="azure",
+            model=str(
+                self.inbound_model
+                or request_kwargs.get("json", {}).get("model")
+                or "unknown"
+            ),
+            operation="azure-responses",
+            path=getattr(req, "path", None),
+            payload=request_kwargs.get("json", {}),
+        )
+
         # Perform upstream request with kwargs directly (no long-lived session)
-        resp = requests.request(**request_kwargs)
+        try:
+            resp = requests.request(**request_kwargs)
+        except requests.RequestException as exc:
+            telemetry.record_request_end(telemetry_id, status_code=502, error=str(exc))
+            return Response(f"Azure upstream request failed: {exc}", status=502)
+
+        telemetry.record_upstream_response(
+            telemetry_id,
+            status_code=resp.status_code,
+            headers=resp.headers,
+        )
         if resp.status_code != 200:
+            telemetry.record_request_end(telemetry_id, status_code=resp.status_code)
             return self._handle_azure_error(resp, request_kwargs)
 
-        return self.response_adapter.adapt(resp)
+        return self.response_adapter.adapt(resp, telemetry_id=telemetry_id)
 
     def _handle_azure_error(self, resp: Response, request_kwargs) -> Response:
 

@@ -5,14 +5,16 @@ from __future__ import annotations
 from typing import Any, Iterable, Iterator
 
 from ..codex.response_adapter import SSEDecoder, SSEEvent
+from ..dashboard.telemetry import telemetry
 
 
 class AnthropicUsageLogger:
     """Collect and log Anthropic usage from native SSE events."""
 
-    def __init__(self, model: str):
+    def __init__(self, model: str, telemetry_id: str = ""):
         """Initialize usage state for a single stream."""
         self.model = model
+        self.telemetry_id = telemetry_id
         self.usage: dict[str, Any] = {}
         self.stop_reason: str | None = None
 
@@ -26,6 +28,12 @@ class AnthropicUsageLogger:
             message = obj.get("message")
             if isinstance(message, dict):
                 self._merge_usage(message.get("usage"))
+            return
+        if (
+            event_name == "content_block_delta"
+            or obj.get("type") == "content_block_delta"
+        ):
+            self._stream_delta(obj)
             return
         if event_name == "message_delta" or obj.get("type") == "message_delta":
             delta = obj.get("delta")
@@ -44,6 +52,36 @@ class AnthropicUsageLogger:
         """Log final Anthropic usage, if present."""
         if self.usage:
             _log_usage(self.model, self.usage, self.stop_reason)
+            if self.telemetry_id:
+                telemetry.record_usage(
+                    self.telemetry_id,
+                    provider="anthropic",
+                    model=self.model,
+                    usage=self.usage,
+                    stop_reason=self.stop_reason,
+                )
+
+    def _stream_delta(self, obj: dict[str, Any]) -> None:
+        if not self.telemetry_id:
+            return
+        delta = obj.get("delta")
+        if not isinstance(delta, dict):
+            return
+        delta_type = delta.get("type")
+        if delta_type == "text_delta":
+            text = str(delta.get("text") or "")
+            if text:
+                telemetry.record_stream_delta(self.telemetry_id, text=text)
+        elif delta_type == "thinking_delta":
+            thinking = str(delta.get("thinking") or delta.get("text") or "")
+            if thinking:
+                telemetry.record_stream_delta(self.telemetry_id, reasoning=thinking)
+        elif delta_type == "input_json_delta":
+            partial_json = str(delta.get("partial_json") or "")
+            if partial_json:
+                telemetry.record_stream_delta(
+                    self.telemetry_id, tool_delta=partial_json
+                )
 
     def _merge_usage(self, usage: Any) -> None:
         if not isinstance(usage, dict):
@@ -56,11 +94,11 @@ class AnthropicUsageLogger:
 
 
 def log_anthropic_sse_usage(
-    chunks: Iterable[bytes], *, model: str
+    chunks: Iterable[bytes], *, model: str, telemetry_id: str = ""
 ) -> Iterator[bytes]:
     """Yield Anthropic SSE chunks while logging cache and token usage."""
     decoder = SSEDecoder()
-    logger = AnthropicUsageLogger(model)
+    logger = AnthropicUsageLogger(model, telemetry_id)
     try:
         for chunk in chunks:
             for event in decoder.feed(chunk):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import platform
 import subprocess
 import sys
@@ -14,9 +13,15 @@ SERVICE_NAME = "Conduit"
 SERVICE_ID = "conduit"
 
 
-def service_command(*, host: str, port: int) -> list[str]:
+def service_command(
+    *,
+    host: str,
+    port: int,
+    dashboard: bool = True,
+    dashboard_port: int = 20130,
+) -> list[str]:
     """Return the Python command used by service managers."""
-    return [
+    command = [
         sys.executable,
         "-m",
         "conduit.cli",
@@ -26,7 +31,11 @@ def service_command(*, host: str, port: int) -> list[str]:
         host,
         "--port",
         str(port),
+        "--dashboard-port",
+        str(dashboard_port),
     ]
+    command.append("--dashboard" if dashboard else "--no-dashboard")
+    return command
 
 
 def install_service(
@@ -35,15 +44,29 @@ def install_service(
     port: int,
     dry_run: bool = False,
     start: bool = True,
+    dashboard: bool = True,
+    dashboard_port: int = 20130,
 ) -> list[str]:
     """Install Conduit as the best native user service for this platform."""
     system = platform.system().lower()
     if system == "linux":
         return install_systemd_user_service(
-            host=host, port=port, dry_run=dry_run, start=start
+            host=host,
+            port=port,
+            dry_run=dry_run,
+            start=start,
+            dashboard=dashboard,
+            dashboard_port=dashboard_port,
         )
     if system == "windows":
-        return install_windows_task(host=host, port=port, dry_run=dry_run, start=start)
+        return install_windows_task(
+            host=host,
+            port=port,
+            dry_run=dry_run,
+            start=start,
+            dashboard=dashboard,
+            dashboard_port=dashboard_port,
+        )
     raise RuntimeError(f"Service install is not supported on {platform.system()}.")
 
 
@@ -94,12 +117,20 @@ def install_systemd_user_service(
     port: int,
     dry_run: bool,
     start: bool,
+    dashboard: bool = True,
+    dashboard_port: int = 20130,
 ) -> list[str]:
     """Install a Linux systemd user service."""
     unit_dir = Path.home() / ".config" / "systemd" / "user"
     unit_file = unit_dir / "conduit.service"
     command = " ".join(
-        shell_quote(arg) for arg in service_command(host=host, port=port)
+        shell_quote(arg)
+        for arg in service_command(
+            host=host,
+            port=port,
+            dashboard=dashboard,
+            dashboard_port=dashboard_port,
+        )
     )
     unit = f"""[Unit]
 Description=Conduit AI subscription proxy
@@ -139,13 +170,22 @@ def install_windows_task(
     port: int,
     dry_run: bool,
     start: bool,
+    dashboard: bool = True,
+    dashboard_port: int = 20130,
 ) -> list[str]:
     """Install a Windows logon task that runs Conduit.
 
     A plain Python process is not a native Windows Service process. Task Scheduler
     is the honest no-wrapper option until Conduit ships a Windows service wrapper.
     """
-    command = subprocess.list2cmdline(service_command(host=host, port=port))
+    command = subprocess.list2cmdline(
+        service_command(
+            host=host,
+            port=port,
+            dashboard=dashboard,
+            dashboard_port=dashboard_port,
+        )
+    )
     create = [
         "schtasks.exe",
         "/Create",

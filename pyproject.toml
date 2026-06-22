@@ -30,6 +30,9 @@ conduit = "conduit.cli:cli"
 [tool.setuptools.packages.find]
 include = ["app*", "conduit*"]
 
+[tool.setuptools.package-data]
+"app.dashboard" = ["templates/*.html", "static/*.css", "static/*.js"]
+
 [tool.isort]
 profile = "black"
 
