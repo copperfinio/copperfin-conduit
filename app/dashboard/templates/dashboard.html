@@ -14,10 +14,15 @@
         <div class="app-mark" aria-label="Conduit">C</div>
         <nav class="rail-nav" aria-label="Dashboard sections">
           <a class="rail-item active" href="#overview" title="Overview">01</a>
-          <a class="rail-item" href="#providers" title="Providers">02</a>
+          <a class="rail-item" href="#providers" title="Traffic">02</a>
           <a class="rail-item" href="#review" title="Ops review">03</a>
           <a class="rail-item" href="#fusion" title="Fusion">04</a>
-          <a class="rail-item" href="#requests" title="Requests">05</a>
+          <a class="rail-item" href="#models" title="Models">05</a>
+          <a class="rail-item" href="#auth" title="Provider auth">06</a>
+          <a class="rail-item" href="#route-catalog" title="Routes">07</a>
+          <a class="rail-item" href="#requests" title="Requests">08</a>
+          <a class="rail-item" href="#diagnostics" title="Diagnostics">09</a>
+          <a class="rail-item" href="#settings" title="Settings">10</a>
         </nav>
       </aside>
 
@@ -34,17 +39,26 @@
         <nav class="menu-section" aria-label="Operations">
           <p class="menu-label">Operations</p>
           <a href="#overview" class="menu-link active"><span>01</span>Overview</a>
-          <a href="#providers" class="menu-link"><span>02</span>Providers</a>
+          <a href="#providers" class="menu-link"><span>02</span>Traffic</a>
           <a href="#review" class="menu-link"><span>!</span>Ops review</a>
           <a href="#fusion" class="menu-link"><span>04</span>Fusion runs</a>
         </nav>
 
+        <nav class="menu-section" aria-label="Configuration">
+          <p class="menu-label">Configuration</p>
+          <a href="#models" class="menu-link"><span>05</span>Models</a>
+          <a href="#auth" class="menu-link"><span>06</span>Providers</a>
+          <a href="#route-catalog" class="menu-link"><span>07</span>Routes</a>
+          <a href="#settings" class="menu-link"><span>10</span>Settings</a>
+        </nav>
+
         <nav class="menu-section" aria-label="Observability">
           <p class="menu-label">Observability</p>
-          <a href="#requests" class="menu-link"><span>05</span>Requests</a>
-          <a href="#routes" class="menu-link"><span>06</span>Route matrix</a>
-          <a href="#content" class="menu-link"><span>07</span>Content</a>
-          <a href="#rates" class="menu-link"><span>08</span>Rate limits</a>
+          <a href="#requests" class="menu-link"><span>08</span>Requests</a>
+          <a href="#routes" class="menu-link"><span>11</span>Route matrix</a>
+          <a href="#content" class="menu-link"><span>12</span>Content</a>
+          <a href="#rates" class="menu-link"><span>13</span>Rate limits</a>
+          <a href="#diagnostics" class="menu-link"><span>09</span>Diagnostics</a>
         </nav>
       </aside>
 
@@ -156,6 +170,46 @@
             <span class="outline-pill" id="readiness-window">session</span>
           </div>
           <div class="provider-readiness-grid" id="provider-readiness"></div>
+        </section>
+
+        <section id="models" class="panel admin-panel model-catalog-panel" aria-label="Model catalog">
+          <div class="panel-heading">
+            <div>
+              <p class="kicker">Configuration</p>
+              <h2>Model catalog</h2>
+            </div>
+            <span class="outline-pill" id="model-catalog-count">0 models</span>
+          </div>
+          <div class="admin-summary-grid" id="model-catalog-summary"></div>
+          <div class="list-table admin-list model-catalog-table" id="model-catalog"></div>
+        </section>
+
+        <section id="auth" class="panel admin-panel provider-auth-panel" aria-label="Provider authentication readiness">
+          <div class="panel-heading">
+            <div>
+              <p class="kicker">Configuration</p>
+              <h2>Provider auth readiness</h2>
+            </div>
+            <span class="outline-pill" id="provider-auth-count">0 ready</span>
+          </div>
+          <div class="admin-summary-grid" id="provider-auth-summary"></div>
+          <div class="provider-auth-grid" id="provider-auth"></div>
+        </section>
+
+        <section id="route-catalog" class="panel admin-panel route-catalog-panel" aria-label="Configured route catalog">
+          <div class="panel-heading">
+            <div>
+              <p class="kicker">Configuration</p>
+              <h2>Routes and recent decisions</h2>
+            </div>
+            <span class="outline-pill" id="route-catalog-count">0 routes</span>
+          </div>
+          <div class="list-table admin-list route-catalog-table" id="route-catalog-table"></div>
+          <div class="route-decision-heading">
+            <span class="kicker">Recent decisions</span>
+            <span class="outline-pill" id="route-decision-count">0 decisions</span>
+          </div>
+          <div class="list-table admin-list route-decision-table" id="route-decisions"></div>
         </section>
 
         <section class="main-grid">
@@ -524,6 +578,29 @@
           </div>
           <div class="stream-summary-grid" id="stream-summary"></div>
           <div class="list-table stream-table" id="stream-shape"></div>
+        </section>
+
+        <section id="diagnostics" class="panel admin-panel diagnostics-panel" aria-label="Dashboard diagnostics">
+          <div class="panel-heading">
+            <div>
+              <p class="kicker">Diagnostics</p>
+              <h2>Redacted local health checks</h2>
+            </div>
+            <span class="outline-pill" id="diagnostics-count">0 settings</span>
+          </div>
+          <div class="diagnostics-grid" id="diagnostics-summary"></div>
+          <div class="diagnostic-notes" id="diagnostic-notes"></div>
+        </section>
+
+        <section id="settings" class="panel admin-panel settings-panel" aria-label="Effective dashboard settings">
+          <div class="panel-heading">
+            <div>
+              <p class="kicker">Settings</p>
+              <h2>Effective settings</h2>
+            </div>
+            <span class="outline-pill green">redacted</span>
+          </div>
+          <div class="list-table admin-list settings-table" id="effective-settings"></div>
         </section>
 
         <section id="fusion" class="panel fusion-runs-panel" aria-label="Fusion run breakdown">

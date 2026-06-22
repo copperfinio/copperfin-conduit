@@ -7,7 +7,10 @@ import pytest
 from app.dashboard.app import create_dashboard_app
 from app.dashboard.blueprint import build_ops_review
 from app.dashboard.telemetry import telemetry
+from app.anthropic.settings import AnthropicModelProfile
+from app.codex.settings import CodexModelProfile
 from app.fusion.invoker import FusionModelInvoker, FusionTextResult
+from app.fusion.settings import FusionModelProfile
 
 
 @pytest.fixture(autouse=True)
@@ -504,14 +507,85 @@ def test_dashboard_routes_render_shell_and_snapshot_payload():
     assert 'id="ops-risk-summary"' in html
     assert 'id="ops-fix-queue"' in html
     assert 'id="ops-provider-posture"' in html
+    assert 'id="model-catalog"' in html
+    assert 'id="model-catalog-summary"' in html
+    assert 'id="provider-auth"' in html
+    assert 'id="provider-auth-summary"' in html
+    assert 'id="route-catalog-table"' in html
+    assert 'id="route-decisions"' in html
+    assert 'id="diagnostic-notes"' in html
+    assert 'id="effective-settings"' in html
+    assert 'href="#models"' in html
+    assert 'href="#auth"' in html
+    assert 'href="#route-catalog"' in html
+    assert 'href="#diagnostics"' in html
+    assert 'href="#settings"' in html
     assert 'data-chart-key="token"' in html
     assert 'data-chart-mode="bar"' in html
     assert 'class="menu-rail"' in html
 
     assert snapshot_response.status_code == 200
     snapshot = snapshot_response.get_json()
+    assert "model_catalog" in snapshot
+    assert "provider_readiness" in snapshot
+    assert "route_catalog" in snapshot
+    assert "diagnostics" in snapshot
     assert snapshot["ops_review"]["signals"]
     assert snapshot["fusion_runs"][0]["calls"][0]["phase"] == "synthesizer"
 
     assert review_response.status_code == 200
     assert review_response.get_json()["score"] >= 0
+
+
+def test_dashboard_admin_inventory_reports_models_routes_and_redacts_secrets():
+    """Admin inventory exposes routing state without leaking credentials."""
+    app = create_dashboard_app()
+    app.config.update(
+        ENABLE_AZURE=True,
+        ENABLE_CODEX=True,
+        ENABLE_ANTHROPIC=True,
+        AZURE_BASE_URL="https://test-resource.openai.azure.com",
+        AZURE_API_KEY="super-secret-key",
+        SERVICE_API_KEY="super-secret-service",
+        AZURE_MODEL_DEPLOYMENTS={"gpt-5.5": "azure-gpt-55"},
+        CODEX_SUPPORTED_MODELS=("gpt-5.5",),
+        ANTHROPIC_SUPPORTED_MODELS=("claude-opus-4-8",),
+        CODEX_MODEL_PROFILES={
+            "cp-gpt55-xhigh": CodexModelProfile(
+                model="gpt-5.5",
+                reasoning_effort="xhigh",
+                service_tier="priority",
+            ),
+        },
+        ANTHROPIC_MODEL_PROFILES={
+            "cp-opus48-xhigh": AnthropicModelProfile(
+                model="claude-opus-4-8",
+                effort="xhigh",
+                max_tokens=4096,
+                speed="fast",
+            ),
+        },
+        FUSION_MODEL_PROFILES={
+            "cp-fusion55": FusionModelProfile(
+                synthesizer_model="cp-opus48-xhigh",
+                panel_models=("cp-gpt55-xhigh", "cp-opus48-xhigh"),
+            ),
+        },
+    )
+
+    data = app.test_client().get("/dashboard/api/snapshot").get_json()
+    model_ids = {row["id"] for row in data["model_catalog"]["rows"]}
+    route_ids = {row["id"] for row in data["route_catalog"]["routes"]}
+    settings = {row["key"]: row for row in data["diagnostics"]["settings"]}
+
+    assert {"gpt-5.5", "cp-gpt55-xhigh", "cp-opus48-xhigh", "cp-fusion55"} <= model_ids
+    assert any(
+        row["provider"] == "azure" and row["upstream_model"] == "azure-gpt-55"
+        for row in data["model_catalog"]["rows"]
+    )
+    assert {"codex-openai-chat", "anthropic-openai-bridge", "fusion-openai-chat"} <= route_ids
+    assert data["provider_readiness"]["summary"]["ready"] >= 1
+    assert settings["SERVICE_API_KEY"]["value"] == "[redacted]"
+    assert settings["AZURE_API_KEY"]["value"] == "[redacted]"
+    assert settings["CODEX_TOKEN_REFRESH_SKEW_SECONDS"]["value"] == "300"
+    assert "super-secret" not in str(data)

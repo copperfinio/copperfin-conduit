@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import os
+import time
+from dataclasses import asdict, is_dataclass
+from pathlib import Path
 from typing import Any
 
-from flask import Blueprint, Response, jsonify, render_template
+from flask import Blueprint, Response, current_app, jsonify, render_template
 
+from ..anthropic.auth_state import AnthropicAuthStateError, AnthropicAuthStore
+from ..codex.auth_state import AuthStateError, CodexAuthStore
 from .telemetry import telemetry
 
 dashboard_blueprint = Blueprint(
@@ -28,6 +34,8 @@ def index() -> str:
 def snapshot() -> Response:
     """Return the current in-process telemetry snapshot."""
     data = telemetry.snapshot()
+    admin = build_admin_inventory(data)
+    data.update(admin)
     data["ops_review"] = build_ops_review(data)
     return jsonify(data)
 
@@ -35,7 +43,9 @@ def snapshot() -> Response:
 @dashboard_blueprint.route("/api/ops-review", methods=["GET"])
 def ops_review() -> Response:
     """Return a deterministic operational review for current telemetry."""
-    return jsonify(build_ops_review(telemetry.snapshot()))
+    data = telemetry.snapshot()
+    data.update(build_admin_inventory(data))
+    return jsonify(build_ops_review(data))
 
 
 @dashboard_blueprint.route("/api/reset", methods=["POST"])
@@ -43,6 +53,600 @@ def reset() -> Response:
     """Reset live telemetry for a fresh manual dashboard session."""
     telemetry.reset()
     return jsonify({"status": "ok"})
+
+
+def build_admin_inventory(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Project runtime configuration into redacted dashboard inventory data."""
+    model_catalog = build_model_catalog()
+    provider_readiness = build_provider_readiness(model_catalog)
+    route_catalog = build_route_catalog(snapshot, model_catalog, provider_readiness)
+    diagnostics = build_diagnostics(model_catalog, provider_readiness, route_catalog)
+    return {
+        "model_catalog": model_catalog,
+        "provider_readiness": provider_readiness,
+        "route_catalog": route_catalog,
+        "diagnostics": diagnostics,
+    }
+
+
+def build_model_catalog() -> dict[str, Any]:
+    """Return configured model aliases and provider-local model IDs."""
+    rows: list[dict[str, Any]] = []
+    enabled = {
+        "azure": bool(current_app.config.get("ENABLE_AZURE", False)),
+        "codex": bool(current_app.config.get("ENABLE_CODEX", False)),
+        "anthropic": bool(current_app.config.get("ENABLE_ANTHROPIC", False)),
+        "fusion": bool(current_app.config.get("FUSION_MODEL_PROFILES") or {}),
+    }
+
+    for model, deployment in sorted((current_app.config.get("AZURE_MODEL_DEPLOYMENTS") or {}).items()):
+        rows.append(
+            _model_row(
+                model_id=str(model),
+                provider="azure",
+                source="native",
+                upstream_model=str(deployment),
+                compatibility="OpenAI responses / chat",
+                endpoint="/v1/chat/completions",
+                enabled=enabled["azure"],
+                details={"deployment": deployment},
+            )
+        )
+
+    for model in current_app.config.get("CODEX_SUPPORTED_MODELS") or ():
+        rows.append(
+            _model_row(
+                model_id=str(model),
+                provider="codex",
+                source="native",
+                upstream_model=str(model),
+                compatibility="OpenAI chat",
+                endpoint="/codex/v1/chat/completions",
+                enabled=enabled["codex"],
+            )
+        )
+
+    for alias, profile in sorted((current_app.config.get("CODEX_MODEL_PROFILES") or {}).items()):
+        payload = _profile_payload(profile)
+        rows.append(
+            _model_row(
+                model_id=str(alias),
+                provider="codex",
+                source="alias",
+                upstream_model=str(payload.get("model") or ""),
+                compatibility="OpenAI chat",
+                endpoint="/codex/v1/chat/completions",
+                enabled=enabled["codex"],
+                details={
+                    "reasoning_effort": payload.get("reasoning_effort"),
+                    "service_tier": payload.get("service_tier"),
+                },
+            )
+        )
+
+    for model in current_app.config.get("ANTHROPIC_SUPPORTED_MODELS") or ():
+        rows.append(
+            _model_row(
+                model_id=str(model),
+                provider="anthropic",
+                source="native",
+                upstream_model=str(model),
+                compatibility="Anthropic messages / OpenAI bridge",
+                endpoint="/anthropic/v1/messages",
+                enabled=enabled["anthropic"],
+            )
+        )
+
+    for alias, profile in sorted(
+        (current_app.config.get("ANTHROPIC_MODEL_PROFILES") or {}).items()
+    ):
+        payload = _profile_payload(profile)
+        rows.append(
+            _model_row(
+                model_id=str(alias),
+                provider="anthropic",
+                source="alias",
+                upstream_model=str(payload.get("model") or ""),
+                compatibility="Anthropic messages / OpenAI bridge",
+                endpoint="/codex/v1/chat/completions",
+                enabled=enabled["anthropic"],
+                details={
+                    "effort": payload.get("effort"),
+                    "max_tokens": payload.get("max_tokens"),
+                    "speed": payload.get("speed"),
+                },
+            )
+        )
+
+    for alias, profile in sorted((current_app.config.get("FUSION_MODEL_PROFILES") or {}).items()):
+        payload = _profile_payload(profile)
+        rows.append(
+            _model_row(
+                model_id=str(alias),
+                provider="fusion",
+                source="alias",
+                upstream_model=str(payload.get("synthesizer_model") or ""),
+                compatibility="OpenAI chat compound model",
+                endpoint="/codex/v1/chat/completions",
+                enabled=enabled["fusion"],
+                details={
+                    "synthesizer_model": payload.get("synthesizer_model"),
+                    "panel_models": list(payload.get("panel_models") or ()),
+                    "panel_count": len(payload.get("panel_models") or ()),
+                },
+            )
+        )
+
+    providers: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        provider = row["provider"]
+        item = providers.setdefault(
+            provider,
+            {"provider": provider, "total": 0, "aliases": 0, "native": 0, "enabled": enabled.get(provider, False)},
+        )
+        item["total"] += 1
+        item["aliases"] += 1 if row["source"] == "alias" else 0
+        item["native"] += 1 if row["source"] == "native" else 0
+
+    return {
+        "generated_at": time.time(),
+        "summary": {
+            "total_models": len(rows),
+            "aliases": sum(1 for row in rows if row["source"] == "alias"),
+            "native": sum(1 for row in rows if row["source"] == "native"),
+            "enabled_providers": sum(1 for value in enabled.values() if value),
+        },
+        "providers": list(providers.values()),
+        "rows": rows,
+    }
+
+
+def build_provider_readiness(model_catalog: dict[str, Any]) -> dict[str, Any]:
+    """Return provider enablement and auth-state readiness without leaking tokens."""
+    rows = [
+        _azure_readiness(),
+        _codex_readiness(),
+        _anthropic_readiness(),
+        _fusion_readiness(model_catalog),
+    ]
+    return {
+        "generated_at": time.time(),
+        "summary": {
+            "providers": len(rows),
+            "ready": sum(1 for row in rows if row["state"] == "ready"),
+            "disabled": sum(1 for row in rows if row["state"] == "disabled"),
+            "attention": sum(1 for row in rows if row["state"] in {"missing", "expired", "error"}),
+        },
+        "rows": rows,
+    }
+
+
+def build_route_catalog(
+    snapshot: dict[str, Any],
+    model_catalog: dict[str, Any],
+    provider_readiness: dict[str, Any],
+) -> dict[str, Any]:
+    """Return configured endpoint behavior plus recent routing decisions."""
+    readiness = {row["provider"]: row for row in provider_readiness.get("rows") or []}
+    models = model_catalog.get("rows") or []
+    fusion_aliases = [row["id"] for row in models if row["provider"] == "fusion"]
+    anthropic_aliases = [
+        row["id"]
+        for row in models
+        if row["provider"] == "anthropic" and row["source"] == "alias"
+    ]
+
+    routes = [
+        _route_row(
+            "codex-openai-chat",
+            "/codex/v1/chat/completions",
+            "OpenAI chat",
+            "Codex",
+            "Default for Codex and GPT profile aliases.",
+            readiness.get("codex"),
+            model_count=sum(1 for row in models if row["provider"] == "codex"),
+        ),
+        _route_row(
+            "anthropic-openai-bridge",
+            "/codex/v1/chat/completions",
+            "OpenAI chat",
+            "Anthropic bridge",
+            "Claude aliases sent through the OpenAI-compatible route are dispatched to Anthropic.",
+            readiness.get("anthropic"),
+            model_count=len(anthropic_aliases),
+            aliases=anthropic_aliases,
+        ),
+        _route_row(
+            "anthropic-native",
+            "/anthropic/v1/messages",
+            "Anthropic messages",
+            "Anthropic",
+            "Native Claude-compatible messages endpoint.",
+            readiness.get("anthropic"),
+            model_count=sum(1 for row in models if row["provider"] == "anthropic"),
+        ),
+        _route_row(
+            "claude-native-alias",
+            "/claude/v1/messages",
+            "Anthropic messages",
+            "Anthropic",
+            "Convenience alias for native Claude-compatible messages.",
+            readiness.get("anthropic"),
+            model_count=sum(1 for row in models if row["provider"] == "anthropic"),
+        ),
+        _route_row(
+            "fusion-openai-chat",
+            "/codex/v1/chat/completions",
+            "OpenAI chat",
+            "Fusion",
+            "Fusion aliases fan out to private panel calls, then a synthesizer call.",
+            readiness.get("fusion"),
+            model_count=len(fusion_aliases),
+            aliases=fusion_aliases,
+        ),
+        _route_row(
+            "azure-default",
+            "/v1/chat/completions",
+            "OpenAI chat",
+            "Azure",
+            "Unprefixed requests fall through to Azure when enabled.",
+            readiness.get("azure"),
+            model_count=len(current_app.config.get("AZURE_MODEL_DEPLOYMENTS") or {}),
+        ),
+    ]
+
+    decisions = _recent_route_decisions(snapshot)
+    return {
+        "generated_at": time.time(),
+        "summary": {
+            "routes": len(routes),
+            "enabled": sum(1 for row in routes if row["enabled"]),
+            "recent_decisions": len(decisions),
+            "recent_errors": sum(1 for row in decisions if row["state"] == "error"),
+        },
+        "routes": routes,
+        "recent_decisions": decisions,
+    }
+
+
+def build_diagnostics(
+    model_catalog: dict[str, Any],
+    provider_readiness: dict[str, Any],
+    route_catalog: dict[str, Any],
+) -> dict[str, Any]:
+    """Return redacted effective settings for local diagnostics."""
+    keys = [
+        "FLASK_ENV",
+        "DEBUG",
+        "RECORD_TRAFFIC",
+        "LOG_CONTEXT",
+        "LOG_COMPLETION",
+        "REASONING_DISPLAY_MODE",
+        "DASHBOARD_PORT",
+        "ENABLE_AZURE",
+        "ENABLE_CODEX",
+        "ENABLE_ANTHROPIC",
+        "CODEX_AUTH_PATH",
+        "CODEX_DISCOVERY_MODE",
+        "CODEX_REQUEST_TIMEOUT_SECONDS",
+        "ANTHROPIC_AUTH_PATH",
+        "ANTHROPIC_CACHE_CONTROL",
+        "ANTHROPIC_CACHE_TTL",
+        "ANTHROPIC_THINKING_DISPLAY",
+        "ANTHROPIC_EAGER_TOOL_STREAMING",
+        "ANTHROPIC_TOKEN_REFRESH_SKEW_SECONDS",
+        "ANTHROPIC_REQUEST_TIMEOUT_SECONDS",
+        "CODEX_TOKEN_REFRESH_SKEW_SECONDS",
+        "FUSION_PANEL_MAX_TOKENS",
+        "FUSION_PANEL_TIMEOUT_SECONDS",
+        "AZURE_BASE_URL",
+        "AZURE_RESPONSES_API_URL",
+        "SERVICE_API_KEY",
+        "AZURE_API_KEY",
+    ]
+    settings = [
+        {
+            "key": key,
+            "value": _redacted_config_value(key, current_app.config.get(key)),
+            "redacted": _is_sensitive_key(key),
+        }
+        for key in keys
+        if key in current_app.config
+    ]
+    return {
+        "generated_at": time.time(),
+        "summary": {
+            "settings": len(settings),
+            "models": (model_catalog.get("summary") or {}).get("total_models", 0),
+            "providers_ready": (provider_readiness.get("summary") or {}).get("ready", 0),
+            "routes_enabled": (route_catalog.get("summary") or {}).get("enabled", 0),
+        },
+        "settings": settings,
+        "notes": [
+            "Dashboard data is in-process for the current proxy service instance.",
+            "Credential-like values are redacted before they reach the browser.",
+            "Auth readiness checks validate local files only; they do not refresh tokens.",
+        ],
+    }
+
+
+def _model_row(
+    *,
+    model_id: str,
+    provider: str,
+    source: str,
+    upstream_model: str,
+    compatibility: str,
+    endpoint: str,
+    enabled: bool,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": model_id,
+        "provider": provider,
+        "source": source,
+        "upstream_model": upstream_model,
+        "compatibility": compatibility,
+        "endpoint": endpoint,
+        "enabled": enabled,
+        "state": "available" if enabled else "disabled",
+        "details": _clean_details(details or {}),
+    }
+
+
+def _route_row(
+    route_id: str,
+    path: str,
+    protocol: str,
+    target: str,
+    behavior: str,
+    readiness: dict[str, Any] | None,
+    *,
+    model_count: int,
+    aliases: list[str] | None = None,
+) -> dict[str, Any]:
+    state = (readiness or {}).get("state") or "unknown"
+    return {
+        "id": route_id,
+        "path": path,
+        "protocol": protocol,
+        "target": target,
+        "behavior": behavior,
+        "enabled": state in {"ready", "warning"},
+        "state": state,
+        "model_count": model_count,
+        "aliases": aliases or [],
+    }
+
+
+def _azure_readiness() -> dict[str, Any]:
+    enabled = bool(current_app.config.get("ENABLE_AZURE", False))
+    base_url = str(current_app.config.get("AZURE_BASE_URL") or "")
+    api_key = str(current_app.config.get("AZURE_API_KEY") or "")
+    configured = bool(
+        base_url
+        and base_url != "change_me"
+        and api_key
+        and api_key != "change_me"
+    )
+    return {
+        "provider": "azure",
+        "label": "Azure",
+        "enabled": enabled,
+        "state": "ready" if enabled and configured else "disabled" if not enabled else "missing",
+        "auth": "api key configured" if configured else "api key missing",
+        "path": None,
+        "expires_at": None,
+        "account": None,
+        "detail": "Azure fallback route" if enabled else "Provider disabled",
+    }
+
+
+def _codex_readiness() -> dict[str, Any]:
+    enabled = bool(current_app.config.get("ENABLE_CODEX", False))
+    if not enabled:
+        return _disabled_readiness("codex", "Codex", current_app.config.get("CODEX_AUTH_PATH"))
+
+    path = Path(current_app.config["CODEX_AUTH_PATH"]).expanduser()
+    store = CodexAuthStore(path)
+    try:
+        state = store.load()
+        auth_state = "expired" if state.is_expired(
+            skew_seconds=int(current_app.config.get("CODEX_TOKEN_REFRESH_SKEW_SECONDS", 300))
+        ) else "ready"
+        detail = "auth file loaded"
+        account = _mask_identifier(state.account_id)
+        expires_at = state.access_expires_at
+    except AuthStateError as exc:
+        auth_state = "missing" if not path.exists() else "error"
+        detail = str(exc)
+        account = None
+        expires_at = None
+    return {
+        "provider": "codex",
+        "label": "Codex",
+        "enabled": enabled,
+        "state": auth_state,
+        "auth": "ChatGPT OAuth",
+        "path": _display_path(path),
+        "expires_at": expires_at,
+        "account": account,
+        "detail": _safe_detail(detail),
+    }
+
+
+def _anthropic_readiness() -> dict[str, Any]:
+    enabled = bool(current_app.config.get("ENABLE_ANTHROPIC", False))
+    if not enabled:
+        return _disabled_readiness(
+            "anthropic",
+            "Anthropic",
+            current_app.config.get("ANTHROPIC_AUTH_PATH"),
+        )
+
+    path = Path(current_app.config["ANTHROPIC_AUTH_PATH"]).expanduser()
+    store = AnthropicAuthStore(path)
+    try:
+        state = store.load()
+        auth_state = "expired" if state.is_expired(
+            skew_seconds=int(current_app.config.get("ANTHROPIC_TOKEN_REFRESH_SKEW_SECONDS", 300))
+        ) else "ready"
+        detail = "auth file loaded"
+        expires_at = state.access_expires_at
+    except AnthropicAuthStateError as exc:
+        auth_state = "missing" if not path.exists() else "error"
+        detail = str(exc)
+        expires_at = None
+    return {
+        "provider": "anthropic",
+        "label": "Anthropic",
+        "enabled": enabled,
+        "state": auth_state,
+        "auth": "Claude OAuth",
+        "path": _display_path(path),
+        "expires_at": expires_at,
+        "account": None,
+        "detail": _safe_detail(detail),
+    }
+
+
+def _fusion_readiness(model_catalog: dict[str, Any]) -> dict[str, Any]:
+    profiles = current_app.config.get("FUSION_MODEL_PROFILES") or {}
+    model_rows = model_catalog.get("rows") or []
+    aliases = [row["id"] for row in model_rows if row["provider"] == "fusion"]
+    enabled = bool(profiles)
+    return {
+        "provider": "fusion",
+        "label": "Fusion",
+        "enabled": enabled,
+        "state": "ready" if enabled else "disabled",
+        "auth": "delegates to panel providers",
+        "path": None,
+        "expires_at": None,
+        "account": None,
+        "detail": (
+            f"{len(aliases)} Fusion alias{'es' if len(aliases) != 1 else ''} configured"
+            if aliases
+            else "No Fusion aliases configured"
+        ),
+    }
+
+
+def _disabled_readiness(provider: str, label: str, path: Any) -> dict[str, Any]:
+    return {
+        "provider": provider,
+        "label": label,
+        "enabled": False,
+        "state": "disabled",
+        "auth": "disabled",
+        "path": _display_path(Path(path).expanduser()) if path else None,
+        "expires_at": None,
+        "account": None,
+        "detail": "Provider disabled",
+    }
+
+
+def _recent_route_decisions(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    records = [*(snapshot.get("active_requests") or []), *(snapshot.get("recent_requests") or [])]
+    rows: list[dict[str, Any]] = []
+    for record in records[:60]:
+        status = _safe_int(record.get("final_status") or record.get("upstream_status"))
+        ok = not _request_is_error(record)
+        rows.append(
+            {
+                "request_id": record.get("id"),
+                "started_at": record.get("started_at"),
+                "ended_at": record.get("ended_at"),
+                "provider": record.get("provider") or "unknown",
+                "upstream_provider": record.get("upstream_provider") or record.get("provider") or "unknown",
+                "phase": record.get("phase") or "",
+                "model": record.get("display_label") or record.get("label") or record.get("model") or "unknown model",
+                "operation": record.get("operation") or "",
+                "path": record.get("path") or "",
+                "status_code": status or None,
+                "state": "ok" if ok else "error",
+                "error_type": record.get("error_type") or "",
+                "retryable": bool(record.get("retryable")),
+                "tier": record.get("tier") or "",
+                "plan": record.get("plan") or "",
+            }
+        )
+    return rows
+
+
+def _profile_payload(profile: Any) -> dict[str, Any]:
+    if is_dataclass(profile):
+        return asdict(profile)
+    if isinstance(profile, dict):
+        return dict(profile)
+    return {
+        key: getattr(profile, key)
+        for key in dir(profile)
+        if not key.startswith("_") and not callable(getattr(profile, key))
+    }
+
+
+def _clean_details(details: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in details.items()
+        if not _is_empty_detail(value)
+    }
+
+
+def _is_empty_detail(value: Any) -> bool:
+    return value is None or value == "" or value == () or value == []
+
+
+def _is_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    sensitive_markers = (
+        "api_key",
+        "service_api_key",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "secret",
+        "password",
+        "bearer",
+    )
+    return any(marker in lowered for marker in sensitive_markers)
+
+
+def _redacted_config_value(key: str, value: Any) -> str:
+    if _is_sensitive_key(key):
+        return "[redacted]" if value else "[not set]"
+    if isinstance(value, Path):
+        return _display_path(value.expanduser())
+    if isinstance(value, dict):
+        return f"{len(value)} configured"
+    if isinstance(value, (tuple, list, set)):
+        return f"{len(value)} configured"
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _display_path(path: Path) -> str:
+    try:
+        home = Path.home().resolve()
+        resolved = path.resolve()
+        relative = resolved.relative_to(home)
+        return os.path.join("~", str(relative))
+    except (OSError, ValueError):
+        return str(path)
+
+
+def _mask_identifier(value: str | None) -> str | None:
+    if not value:
+        return None
+    if len(value) <= 8:
+        return f"{value[:2]}..."
+    return f"{value[:4]}...{value[-4:]}"
+
+
+def _safe_detail(value: str) -> str:
+    return str(value).replace(str(Path.home()), "~")[:260]
 
 
 def build_ops_review(snapshot: dict[str, Any]) -> dict[str, Any]:

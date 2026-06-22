@@ -249,6 +249,10 @@ function renderSnapshot(rawSnapshot) {
   renderProviderPosture(snapshot.providers || {});
   renderProviderRunway(snapshot.providers || {}, snapshot.timeseries || []);
   renderProviderReadiness(snapshot.providers || {}, snapshot.recent_requests || [], snapshot.active_requests || []);
+  renderModelCatalog(snapshot.model_catalog || {});
+  renderAdminProviderAuth(snapshot.provider_readiness || {});
+  renderRouteCatalog(snapshot.route_catalog || {});
+  renderDiagnostics(snapshot.diagnostics || {});
   renderRateLimits(snapshot.providers || {}, snapshot.rate_limit_note);
   renderFusionRuns(snapshot.fusion_runs || []);
   renderRequests("active-requests", snapshot.active_requests || [], true);
@@ -298,6 +302,16 @@ function applyWindowFilter(rawSnapshot) {
   const contentEvents = cutoff == null
     ? (rawSnapshot.content_events || []).slice()
     : (rawSnapshot.content_events || []).filter((event) => Number(event.timestamp || 0) >= cutoff);
+  const routeCatalog = rawSnapshot.route_catalog
+    ? {
+        ...rawSnapshot.route_catalog,
+        recent_decisions: cutoff == null
+          ? (rawSnapshot.route_catalog.recent_decisions || []).slice()
+          : (rawSnapshot.route_catalog.recent_decisions || []).filter((decision) => (
+              Number(decision.ended_at || decision.started_at || 0) >= cutoff
+            )),
+      }
+    : rawSnapshot.route_catalog;
 
   const scoped = {
     ...rawSnapshot,
@@ -305,6 +319,7 @@ function applyWindowFilter(rawSnapshot) {
     recent_requests: recent,
     content_events: contentEvents,
     timeseries,
+    route_catalog: routeCatalog,
     totals: totalSummary(records),
     providers: providerSummaries(records),
     fusion_runs: fusionSummaries(records, Number(rawSnapshot.generated_at || Date.now() / 1000)),
@@ -778,6 +793,14 @@ function updateMenuBadges(snapshot) {
   document.querySelectorAll('a[href="#review"]').forEach((link) => {
     link.classList.toggle("attention", Boolean(errors || active));
   });
+  const authAttention = Number(((snapshot.provider_readiness || {}).summary || {}).attention || 0);
+  document.querySelectorAll('a[href="#auth"]').forEach((link) => {
+    link.classList.toggle("attention", Boolean(authAttention));
+  });
+  const routeErrors = Number(((snapshot.route_catalog || {}).summary || {}).recent_errors || 0);
+  document.querySelectorAll('a[href="#route-catalog"], a[href="#diagnostics"]').forEach((link) => {
+    link.classList.toggle("attention", Boolean(routeErrors || authAttention));
+  });
 }
 
 function renderTotals(totals) {
@@ -979,6 +1002,195 @@ function renderProviderReadiness(providers, recent, active) {
         <span>${escapeHtml(row.status)}</span>
       </footer>
     </article>`).join("");
+}
+
+function renderModelCatalog(catalog) {
+  const target = $("model-catalog");
+  const summaryTarget = $("model-catalog-summary");
+  const summary = catalog.summary || {};
+  const rows = catalog.rows || [];
+  setText("model-catalog-count", `${formatNumber(summary.total_models || rows.length)} models`);
+  if (summaryTarget) {
+    summaryTarget.innerHTML = `
+      ${adminSummaryCard("Models", formatNumber(summary.total_models || rows.length), "native + aliases")}
+      ${adminSummaryCard("Aliases", formatNumber(summary.aliases || 0), "operator-facing IDs")}
+      ${adminSummaryCard("Native", formatNumber(summary.native || 0), "provider IDs")}
+      ${adminSummaryCard("Providers", formatNumber(summary.enabled_providers || 0), "enabled")}
+    `;
+  }
+  if (!target) return;
+  if (!rows.length) {
+    target.innerHTML = '<div class="empty-state">No model aliases are configured yet.</div>';
+    return;
+  }
+  target.innerHTML = `
+    <div class="list-head catalog-row">
+      <span>Model</span><span>Provider</span><span>Type</span><span>Upstream</span><span>Endpoint</span><span>Details</span><span>State</span>
+    </div>
+    ${rows.map((row) => `
+      <div class="list-row catalog-row ${escapeHtml(row.state || "unknown")}">
+        <strong title="${escapeHtml(row.id)}">${escapeHtml(row.id)}</strong>
+        <span class="admin-chip ${escapeHtml(row.provider)}">${escapeHtml(providerLabel(row.provider))}</span>
+        <span>${escapeHtml(row.source || "-")}</span>
+        <span title="${escapeHtml(row.upstream_model || "-")}">${escapeHtml(row.upstream_model || "-")}</span>
+        <span title="${escapeHtml(row.endpoint || "-")}">${escapeHtml(row.endpoint || "-")}</span>
+        <span class="admin-detail" title="${escapeHtml(modelDetails(row.details || {}))}">${escapeHtml(modelDetails(row.details || {}))}</span>
+        <span>${statusPill(row.state || "unknown", row.enabled ? "ok" : "neutral")}</span>
+      </div>`).join("")}`;
+}
+
+function renderAdminProviderAuth(readiness) {
+  const target = $("provider-auth");
+  const summaryTarget = $("provider-auth-summary");
+  const summary = readiness.summary || {};
+  const rows = readiness.rows || [];
+  setText("provider-auth-count", `${formatNumber(summary.ready || 0)} ready`);
+  if (summaryTarget) {
+    summaryTarget.innerHTML = `
+      ${adminSummaryCard("Providers", formatNumber(summary.providers || rows.length), "tracked")}
+      ${adminSummaryCard("Ready", formatNumber(summary.ready || 0), "authenticated")}
+      ${adminSummaryCard("Attention", formatNumber(summary.attention || 0), "missing / expired")}
+      ${adminSummaryCard("Disabled", formatNumber(summary.disabled || 0), "not enabled")}
+    `;
+  }
+  if (!target) return;
+  if (!rows.length) {
+    target.innerHTML = '<div class="empty-state">Provider readiness will appear once dashboard config loads.</div>';
+    return;
+  }
+  target.innerHTML = rows.map((row) => `
+    <article class="auth-card ${escapeHtml(row.state || "unknown")}">
+      <div class="auth-card-head">
+        <span style="--provider-color:${COLORS[row.provider] || PALETTE[0]}"></span>
+        <div>
+          <strong>${escapeHtml(row.label || providerLabel(row.provider))}</strong>
+          <small>${escapeHtml(row.auth || "auth unknown")}</small>
+        </div>
+        ${statusPill(row.state || "unknown", authStateClass(row.state))}
+      </div>
+      <div class="auth-facts">
+        ${adminFact("Path", row.path || "-")}
+        ${adminFact("Account", row.account || "-")}
+        ${adminFact("Expires", row.expires_at ? formatTime(row.expires_at) : "-")}
+      </div>
+      <p>${escapeHtml(row.detail || "No detail")}</p>
+    </article>`).join("");
+}
+
+function renderRouteCatalog(routeCatalog) {
+  const routesTarget = $("route-catalog-table");
+  const decisionsTarget = $("route-decisions");
+  const summary = routeCatalog.summary || {};
+  const routes = routeCatalog.routes || [];
+  const decisions = routeCatalog.recent_decisions || [];
+  setText("route-catalog-count", `${formatNumber(summary.enabled || 0)} / ${formatNumber(summary.routes || routes.length)} enabled`);
+  setText("route-decision-count", `${formatNumber(decisions.length)} decisions`);
+  if (routesTarget) {
+    if (!routes.length) {
+      routesTarget.innerHTML = '<div class="empty-state">No route catalog data is available.</div>';
+    } else {
+      routesTarget.innerHTML = `
+        <div class="list-head route-catalog-row">
+          <span>Path</span><span>Target</span><span>Protocol</span><span>Models</span><span>State</span><span>Behavior</span>
+        </div>
+        ${routes.map((row) => `
+          <div class="list-row route-catalog-row ${escapeHtml(row.state || "unknown")}">
+            <strong title="${escapeHtml(row.path)}">${escapeHtml(row.path)}</strong>
+            <span>${escapeHtml(row.target || "-")}</span>
+            <span>${escapeHtml(row.protocol || "-")}</span>
+            <span>${formatNumber(row.model_count || 0)} <em>${escapeHtml((row.aliases || []).slice(0, 3).join(", "))}</em></span>
+            <span>${statusPill(row.state || "unknown", authStateClass(row.state))}</span>
+            <span title="${escapeHtml(row.behavior || "")}">${escapeHtml(row.behavior || "")}</span>
+          </div>`).join("")}`;
+    }
+  }
+  if (!decisionsTarget) return;
+  if (!decisions.length) {
+    decisionsTarget.innerHTML = '<div class="empty-state">Recent route decisions appear after traffic flows through Conduit.</div>';
+    return;
+  }
+  decisionsTarget.innerHTML = `
+    <div class="list-head route-decision-row">
+      <span>Time</span><span>Provider</span><span>Phase</span><span>Model</span><span>Status</span><span>Route</span>
+    </div>
+    ${decisions.slice(0, 24).map((row) => `
+      <div class="list-row route-decision-row ${escapeHtml(row.state || "")}">
+        <span>${formatTime(row.ended_at || row.started_at)}</span>
+        <span>${escapeHtml(providerLabel(row.upstream_provider || row.provider))}</span>
+        <span>${escapeHtml(row.phase || row.operation || "-")}</span>
+        <strong title="${escapeHtml(row.model || "unknown model")}">${escapeHtml(row.model || "unknown model")}</strong>
+        <span>${statusPill(row.status_code || row.state || "-", row.state === "error" ? "error" : "ok")}</span>
+        <span title="${escapeHtml(row.path || "")}">${escapeHtml(row.path || "-")}</span>
+      </div>`).join("")}`;
+}
+
+function renderDiagnostics(diagnostics) {
+  const summaryTarget = $("diagnostics-summary");
+  const notesTarget = $("diagnostic-notes");
+  const settingsTarget = $("effective-settings");
+  const summary = diagnostics.summary || {};
+  const settings = diagnostics.settings || [];
+  setText("diagnostics-count", `${formatNumber(summary.settings || settings.length)} settings`);
+  if (summaryTarget) {
+    summaryTarget.innerHTML = `
+      ${adminSummaryCard("Settings", formatNumber(summary.settings || settings.length), "effective")}
+      ${adminSummaryCard("Models", formatNumber(summary.models || 0), "catalog")}
+      ${adminSummaryCard("Providers", formatNumber(summary.providers_ready || 0), "ready")}
+      ${adminSummaryCard("Routes", formatNumber(summary.routes_enabled || 0), "enabled")}
+    `;
+  }
+  if (notesTarget) {
+    notesTarget.innerHTML = (diagnostics.notes || []).map((note) => `
+      <div class="diagnostic-note">${escapeHtml(note)}</div>`).join("") || '<div class="empty-state">No diagnostic notes.</div>';
+  }
+  if (!settingsTarget) return;
+  if (!settings.length) {
+    settingsTarget.innerHTML = '<div class="empty-state">No effective settings were exposed by the dashboard contract.</div>';
+    return;
+  }
+  settingsTarget.innerHTML = `
+    <div class="list-head setting-row">
+      <span>Setting</span><span>Value</span><span>Exposure</span>
+    </div>
+    ${settings.map((row) => `
+      <div class="list-row setting-row">
+        <strong>${escapeHtml(row.key)}</strong>
+        <span class="setting-value ${row.redacted ? "redacted" : ""}" title="${escapeHtml(row.value)}">${escapeHtml(row.value)}</span>
+        <span>${statusPill(row.redacted ? "redacted" : "visible", row.redacted ? "warning" : "ok")}</span>
+      </div>`).join("")}`;
+}
+
+function adminSummaryCard(label, value, detail) {
+  return `
+    <div class="admin-summary-card">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+      <small>${escapeHtml(detail)}</small>
+    </div>`;
+}
+
+function adminFact(label, value) {
+  return `
+    <span>
+      <b>${escapeHtml(label)}</b>
+      <em title="${escapeHtml(value)}">${escapeHtml(value)}</em>
+    </span>`;
+}
+
+function modelDetails(details) {
+  const entries = Object.entries(details || {}).filter(([, value]) => value !== null && value !== undefined && value !== "");
+  if (!entries.length) return "-";
+  return entries.map(([key, value]) => {
+    const displayValue = Array.isArray(value) ? value.join(", ") : String(value);
+    return `${key.replaceAll("_", " ")}: ${displayValue}`;
+  }).join(" | ");
+}
+
+function authStateClass(state) {
+  if (state === "ready") return "ok";
+  if (state === "missing" || state === "expired" || state === "error") return "error";
+  if (state === "warning") return "warning";
+  return "neutral";
 }
 
 function providerReadinessRow(provider, summary, allRecords) {
