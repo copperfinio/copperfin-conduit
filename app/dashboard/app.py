@@ -17,6 +17,10 @@ def create_dashboard_app(config_object: str = "app.settings") -> Flask:
     """
     app = Flask(__name__)
     app.config.from_object(config_object)
+    # This dashboard is local-only and actively edited during proxy work.
+    # Static files already refresh on request; keep Jinja templates in the
+    # same dev-friendly mode so the UI does not silently serve stale shells.
+    app.config["TEMPLATES_AUTO_RELOAD"] = True
     app.register_blueprint(dashboard_blueprint)
 
     @app.before_request

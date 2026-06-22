@@ -48,6 +48,7 @@ env/
 .env
 
 # Recordings
+/docs/
 /recordings/
 /preview/
 

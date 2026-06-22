@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app.dashboard.app import create_dashboard_app
@@ -456,7 +458,10 @@ def test_dashboard_routes_render_shell_and_snapshot_payload():
     )
     telemetry.record_request_end(request_id, status_code=200)
 
-    client = create_dashboard_app().test_client()
+    app = create_dashboard_app()
+    assert app.config["TEMPLATES_AUTO_RELOAD"] is True
+
+    client = app.test_client()
     html_response = client.get("/dashboard/")
     snapshot_response = client.get("/dashboard/api/snapshot")
     review_response = client.get("/dashboard/api/ops-review")
@@ -466,8 +471,15 @@ def test_dashboard_routes_render_shell_and_snapshot_payload():
     assert 'id="phase-chart"' in html
     assert 'id="efficiency-chart"' in html
     assert 'id="route-matrix"' in html
+    assert 'class="icon-rail"' in html
+    assert 'class="menu-rail"' in html
+    assert 'class="nav-glyph nav-gauge"' in html
+    assert 'class="nav-glyph nav-bars"' in html
+    assert 'class="field-control duration-control"' in html
+    assert "<span>Duration</span>" in html
     assert 'id="window-select"' in html
     assert 'id="group-select"' in html
+    assert 'title="Refresh telemetry"' in html
     assert '<option value="1800">30 minutes</option>' in html
     assert '<option value="7776000">3 months</option>' in html
     assert '<option value="none">None</option>' in html
@@ -522,7 +534,14 @@ def test_dashboard_routes_render_shell_and_snapshot_payload():
     assert 'href="#settings"' in html
     assert 'data-chart-key="token"' in html
     assert 'data-chart-mode="bar"' in html
-    assert 'class="menu-rail"' in html
+    assert '<p class="menu-label">Operations</p>' in html
+    assert '<p class="menu-label">Configuration</p>' in html
+    assert '<p class="menu-label">Observability</p>' in html
+
+    css = Path("app/dashboard/static/dashboard.css").read_text(encoding="utf-8")
+    assert "grid-template-columns: 48px 178px minmax(0, 1fr);" in css
+    assert ".app-shell:has" not in css
+    assert ".workspace {\n  grid-column: 3;" in css
 
     assert snapshot_response.status_code == 200
     snapshot = snapshot_response.get_json()
