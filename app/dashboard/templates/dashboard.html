@@ -62,19 +62,29 @@
               <span>Window</span>
               <select id="window-select" aria-label="Telemetry time window">
                 <option value="all">Session</option>
-                <option value="300">5 minutes</option>
-                <option value="900">15 minutes</option>
-                <option value="3600">1 hour</option>
+                <option value="1800">30 minutes</option>
+                <option value="3600">60 minutes</option>
                 <option value="10800">3 hours</option>
+                <option value="21600">6 hours</option>
+                <option value="43200">12 hours</option>
+                <option value="86400">24 hours</option>
+                <option value="259200">3 days</option>
+                <option value="604800">7 days</option>
+                <option value="2592000">1 month</option>
+                <option value="7776000">3 months</option>
               </select>
             </label>
             <label class="field-control">
               <span>Group by</span>
               <select id="group-select" aria-label="Telemetry grouping">
+                <option value="none">None</option>
                 <option value="provider">Provider</option>
                 <option value="upstream">Upstream</option>
                 <option value="model">Model</option>
                 <option value="phase">Phase</option>
+                <option value="tier">Tier</option>
+                <option value="plan">Plan</option>
+                <option value="status">Status</option>
               </select>
             </label>
             <div class="status-chip" aria-live="polite">

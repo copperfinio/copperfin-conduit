@@ -4,16 +4,26 @@ const GROUP_STORAGE_KEY = "conduit-dashboard-group";
 const CHART_MODE_STORAGE_KEY = "conduit-dashboard-chart-modes";
 const WINDOW_OPTIONS = [
   { value: "all", label: "Session", seconds: null },
-  { value: "300", label: "5 minutes", seconds: 300 },
-  { value: "900", label: "15 minutes", seconds: 900 },
-  { value: "3600", label: "1 hour", seconds: 3600 },
+  { value: "1800", label: "30 minutes", seconds: 1800 },
+  { value: "3600", label: "60 minutes", seconds: 3600 },
   { value: "10800", label: "3 hours", seconds: 10800 },
+  { value: "21600", label: "6 hours", seconds: 21600 },
+  { value: "43200", label: "12 hours", seconds: 43200 },
+  { value: "86400", label: "24 hours", seconds: 86400 },
+  { value: "259200", label: "3 days", seconds: 259200 },
+  { value: "604800", label: "7 days", seconds: 604800 },
+  { value: "2592000", label: "1 month", seconds: 2592000 },
+  { value: "7776000", label: "3 months", seconds: 7776000 },
 ];
 const GROUP_OPTIONS = [
+  { value: "none", label: "None" },
   { value: "provider", label: "Provider" },
   { value: "upstream", label: "Upstream" },
   { value: "model", label: "Model" },
   { value: "phase", label: "Phase" },
+  { value: "tier", label: "Tier" },
+  { value: "plan", label: "Plan" },
+  { value: "status", label: "Status" },
 ];
 const CHART_MODE_OPTIONS = ["area", "line", "bar"];
 const COLORS = {
@@ -51,11 +61,11 @@ function loadWindowValue() {
   } catch (error) {
     // Session storage can fail in locked-down browsers; the dashboard can live without it.
   }
-  return "all";
+  return "10800";
 }
 
 function saveWindowValue(value) {
-  selectedWindowValue = WINDOW_OPTIONS.some((item) => item.value === value) ? value : "all";
+  selectedWindowValue = WINDOW_OPTIONS.some((item) => item.value === value) ? value : "10800";
   try {
     window.sessionStorage.setItem(WINDOW_STORAGE_KEY, selectedWindowValue);
   } catch (error) {
@@ -1607,6 +1617,18 @@ function requestGroup(request) {
   } else if (dimension === "phase") {
     raw = request.phase || (request.provider === "fusion" ? "fusion-envelope" : "direct");
     label = raw === "fusion-envelope" ? "Fusion envelope" : raw;
+  } else if (dimension === "tier") {
+    raw = request.tier || "unknown";
+    label = raw;
+  } else if (dimension === "plan") {
+    raw = request.plan || "unknown";
+    label = raw;
+  } else if (dimension === "status") {
+    raw = request.final_status || request.upstream_status || (request.active ? "active" : "unknown");
+    label = String(raw);
+  } else if (dimension === "none") {
+    raw = "all";
+    label = "All traffic";
   }
   return {
     key: `${dimension}:${raw}`,

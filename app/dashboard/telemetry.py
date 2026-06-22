@@ -17,6 +17,20 @@ CONTENT_EVENT_LIMIT = 160
 TIMESERIES_LIMIT = 360
 PREVIEW_LIMIT = 900
 
+_EVENT_NAMES = (
+    "request.started",
+    "route.selected",
+    "provider.response_headers",
+    "stream.first_delta",
+    "stream.delta",
+    "usage.final",
+    "request.completed",
+    "request.failed",
+    "fusion.child.started",
+    "fusion.child.completed",
+    "fusion.child.failed",
+)
+
 _RATE_LIMIT_HEADER_MAP = {
     "limit_requests": (
         "x-ratelimit-limit-requests",
@@ -78,22 +92,37 @@ _SENSITIVE_KEYS = {
 
 @dataclass
 class RequestRecord:
-    """Mutable state for one active or completed request."""
+    """Mutable normalized telemetry for one active or completed request.
+
+    This is the dashboard contract. Provider adapters may have wildly different
+    payloads, but the dashboard consumes this shape: identity/correlation,
+    route dimensions, timing, usage/cache, cost readiness, stream counters,
+    upstream outcome, and redacted previews. Unknown values stay unknown instead
+    of being guessed because fake observability is just decorative lying.
+    """
 
     request_id: str
     provider: str
     model: str
     operation: str
     started_at: float
+    correlation_id: str | None = None
+    parent_request_id: str | None = None
     upstream_provider: str | None = None
     phase: str | None = None
     run_id: str | None = None
     label: str | None = None
     path: str | None = None
+    tier: str | None = None
+    plan: str | None = None
     upstream_status: int | None = None
     final_status: int | None = None
     error: str | None = None
+    error_type: str | None = None
+    retryable: bool | None = None
     ended_at: float | None = None
+    first_delta_at: float | None = None
+    last_delta_at: float | None = None
     usage: dict[str, int] = field(default_factory=dict)
     cache: dict[str, int] = field(default_factory=dict)
     stream: dict[str, int] = field(default_factory=dict)
@@ -137,6 +166,10 @@ class DashboardTelemetry:
         phase: str | None = None,
         run_id: str | None = None,
         label: str | None = None,
+        correlation_id: str | None = None,
+        parent_request_id: str | None = None,
+        tier: str | None = None,
+        plan: str | None = None,
     ) -> str:
         """Start tracking one request and return its telemetry id."""
         try:
@@ -152,11 +185,17 @@ class DashboardTelemetry:
                 model=_clean_text(model) or "unknown",
                 operation=_clean_text(operation) or "request",
                 started_at=time.time(),
+                correlation_id=_clean_text(correlation_id)
+                or _clean_text(run_id)
+                or request_id,
+                parent_request_id=_clean_text(parent_request_id),
                 upstream_provider=upstream_name,
                 phase=_clean_text(phase),
                 run_id=_clean_text(run_id),
                 label=_clean_text(label),
                 path=_clean_text(path),
+                tier=_clean_text(tier),
+                plan=_clean_text(plan),
                 content_preview=preview,
             )
             content_event = None
@@ -223,9 +262,16 @@ class DashboardTelemetry:
                 record = self._active.get(request_id)
                 if record is None:
                     return
+                has_delta = bool(text or reasoning or tool_delta)
+                now = time.time() if has_delta else None
+                if has_delta and record.first_delta_at is None:
+                    record.first_delta_at = now
+                if has_delta:
+                    record.last_delta_at = now
                 if text:
                     _increment(record.stream, "text_chars", len(text))
                     _increment(record.stream, "chunks", 1)
+                    _increment(record.stream, "text_chunks", 1)
                     record.stream_preview = _truncate(
                         _redact_text(f"{record.stream_preview}{text}"),
                         PREVIEW_LIMIT,
@@ -233,9 +279,11 @@ class DashboardTelemetry:
                 if reasoning:
                     _increment(record.stream, "reasoning_chars", len(reasoning))
                     _increment(record.stream, "chunks", 1)
+                    _increment(record.stream, "reasoning_chunks", 1)
                 if tool_delta:
                     _increment(record.stream, "tool_chars", len(tool_delta))
                     _increment(record.stream, "tool_chunks", 1)
+                    _increment(record.stream, "tool_delta_chunks", 1)
                 self._sequence += 1
         except Exception:  # noqa: B902
             return
@@ -315,6 +363,12 @@ class DashboardTelemetry:
                     record.final_status = status
                 if error:
                     record.error = _clean_text(error)[:240]
+                record.error_type = _classify_error(
+                    record.error, record.final_status or record.upstream_status
+                )
+                record.retryable = _is_retryable_error(
+                    record.error_type, record.final_status or record.upstream_status
+                )
                 if record.stream_preview:
                     self._content.appendleft(
                         self._content_event(
@@ -356,6 +410,9 @@ class DashboardTelemetry:
             return {
                 "generated_at": now,
                 "sequence": sequence,
+                "events": {
+                    "lifecycle": list(_EVENT_NAMES),
+                },
                 "scope": {
                     "storage": "in-memory",
                     "process_scope": "per-process / single service instance",
@@ -411,15 +468,31 @@ class DashboardTelemetry:
                 "run_id": record.run_id,
                 "label": record.label,
                 "model": record.model,
+                "operation": record.operation,
+                "path": record.path,
+                "correlation_id": record.correlation_id
+                or record.run_id
+                or record.request_id,
+                "tier": record.tier,
+                "plan": record.plan,
+                "status_code": record.final_status or record.upstream_status,
+                "error_type": record.error_type
+                or _classify_error(
+                    record.error, record.final_status or record.upstream_status
+                ),
                 "tokens": int(record.usage.get("total_tokens", 0)),
                 "input_tokens": int(record.usage.get("input_tokens", 0)),
                 "output_tokens": int(record.usage.get("output_tokens", 0)),
+                "reasoning_tokens": int(record.usage.get("reasoning_tokens", 0)),
                 "cached_tokens": int(record.cache.get("read_tokens", 0)),
+                "cache_write_tokens": int(record.cache.get("write_tokens", 0)),
                 "latency_ms": _latency_ms(record),
+                "ttft_ms": _ttft_ms(record),
                 "ok": bool(
                     not record.error
                     and _is_success(record.final_status or record.upstream_status)
                 ),
+                "cost": _unknown_cost(),
             }
         )
 
@@ -603,6 +676,8 @@ def serialize_record(
     display_label = record.label or record.model
     return {
         "id": record.request_id,
+        "correlation_id": record.correlation_id or record.run_id or record.request_id,
+        "parent_request_id": record.parent_request_id,
         "provider": record.provider,
         "provider_label": _PROVIDER_LABELS.get(
             record.provider, record.provider.title()
@@ -613,11 +688,15 @@ def serialize_record(
         "label": record.label,
         "display_label": display_label,
         "model": record.model,
+        "tier": record.tier,
+        "plan": record.plan,
         "operation": record.operation,
         "path": record.path,
         "started_at": record.started_at,
         "ended_at": record.ended_at,
         "duration_ms": max(0, int(duration * 1000)),
+        "ttft_ms": _ttft_ms(record),
+        "stream_duration_ms": _stream_duration_ms(record, now=current),
         "active": record.ended_at is None,
         "upstream_status": record.upstream_status,
         "final_status": record.final_status,
@@ -626,12 +705,24 @@ def serialize_record(
             and _is_success(record.final_status or record.upstream_status)
         ),
         "error": record.error,
+        "error_type": record.error_type
+        or _classify_error(record.error, record.final_status or record.upstream_status),
+        "retryable": record.retryable
+        if record.retryable is not None
+        else _is_retryable_error(
+            _classify_error(record.error, record.final_status or record.upstream_status),
+            record.final_status or record.upstream_status,
+        ),
         "usage": dict(record.usage),
         "cache": {
             **record.cache,
             "hit_ratio": (cache_read / cache_base) if cache_base > 0 else 0.0,
         },
-        "stream": dict(record.stream),
+        "stream": _stream_summary(record, now=current),
+        "cost": _unknown_cost(),
+        "pricing_known": False,
+        "estimated_cost_usd": None,
+        "cost_source": None,
         "rate_limits": record.rate_limits or {"status": "unknown"},
         "content_preview": record.content_preview,
     }
@@ -675,6 +766,9 @@ def _provider_summary(
                     (cache["read_tokens"] / cache_base) if cache_base > 0 else 0.0
                 ),
             },
+            "cost": _unknown_cost(),
+            "pricing_known": False,
+            "estimated_cost_usd": None,
             "rate_limits": _latest_rate_limits(filtered),
             "models": _model_counts(filtered),
         }
@@ -700,6 +794,8 @@ def _total_summary(records: list[RequestRecord]) -> dict[str, Any]:
             **cache,
             "hit_ratio": (cache["read_tokens"] / cache_base) if cache_base > 0 else 0.0,
         },
+        "cost": _unknown_cost(),
+        "pricing_known": False,
         "estimated_spend_usd": None,
         "estimated_spend_note": "No pricing table is configured; token burn is reported without fabricated spend.",
     }
@@ -798,6 +894,8 @@ def _empty_totals() -> dict[str, Any]:
             "write_1h_tokens": 0,
             "hit_ratio": 0.0,
         },
+        "cost": _unknown_cost(),
+        "pricing_known": False,
         "estimated_spend_usd": None,
     }
 
@@ -825,6 +923,9 @@ def _empty_provider_summary(provider: str) -> dict[str, Any]:
             "write_1h_tokens": 0,
             "hit_ratio": 0.0,
         },
+        "cost": _unknown_cost(),
+        "pricing_known": False,
+        "estimated_cost_usd": None,
         "rate_limits": {"status": "unknown"},
         "models": {},
     }
@@ -892,6 +993,87 @@ def _model_counts(records: list[RequestRecord]) -> dict[str, int]:
 def _latency_ms(record: RequestRecord, *, now: float | None = None) -> int:
     end = record.ended_at or now or time.time()
     return max(0, int((end - record.started_at) * 1000))
+
+
+def _ttft_ms(record: RequestRecord) -> int | None:
+    if record.first_delta_at is None:
+        return None
+    return max(0, int((record.first_delta_at - record.started_at) * 1000))
+
+
+def _stream_duration_ms(record: RequestRecord, *, now: float | None = None) -> int | None:
+    if record.first_delta_at is None:
+        return None
+    end = record.last_delta_at or record.ended_at or now or time.time()
+    return max(0, int((end - record.first_delta_at) * 1000))
+
+
+def _stream_summary(record: RequestRecord, *, now: float | None = None) -> dict[str, Any]:
+    stream = dict(record.stream)
+    stream.setdefault("chunks", 0)
+    stream.setdefault("text_chunks", 0)
+    stream.setdefault("reasoning_chunks", 0)
+    stream.setdefault("tool_chunks", 0)
+    stream.setdefault("tool_delta_chunks", 0)
+    stream.setdefault("tool_call_count", 0)
+    stream.setdefault("tool_result_count", 0)
+    stream.setdefault("tool_error_count", 0)
+    stream["ttft_ms"] = _ttft_ms(record)
+    stream["duration_ms"] = _stream_duration_ms(record, now=now)
+    return stream
+
+
+def _classify_error(error: str | None, status: int | None) -> str | None:
+    code = _safe_int(status)
+    message = (error or "").lower()
+    if not message and not _is_error_status(code):
+        return None
+    if "assistant message prefill" in message:
+        return "unsupported_assistant_prefill"
+    if "unsupported" in message or "parameter" in message or "prefill" in message:
+        return "unsupported_parameters"
+    if code in {401, 403} or any(
+        fragment in message
+        for fragment in (
+            "unauthorized",
+            "invalid api key",
+            "expired",
+            "credential",
+            "auth",
+        )
+    ):
+        return "auth"
+    if code == 429 or "rate limit" in message or "too many requests" in message:
+        return "rate_limit"
+    if code in {408, 504} or any(
+        fragment in message for fragment in ("timeout", "timed out", "deadline")
+    ):
+        return "timeout"
+    if any(
+        fragment in message
+        for fragment in ("connection", "network", "socket", "dns", "reset by peer")
+    ):
+        return "network"
+    if code is not None and code >= 500:
+        return "provider_5xx"
+    if code is not None and code >= 400:
+        return "client_4xx"
+    return "unknown"
+
+
+def _is_retryable_error(error_type: str | None, status: int | None) -> bool:
+    if error_type in {"rate_limit", "timeout", "provider_5xx", "network"}:
+        return True
+    code = _safe_int(status)
+    return code is not None and code in {408, 429, 500, 502, 503, 504}
+
+
+def _unknown_cost() -> dict[str, Any]:
+    return {
+        "estimated_usd": None,
+        "pricing_known": False,
+        "source": None,
+    }
 
 
 def _percentile(values: list[int], pct: float) -> int:

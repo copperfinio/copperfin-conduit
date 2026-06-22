@@ -283,6 +283,69 @@ def test_stream_preview_redacts_secret_split_across_deltas():
     assert assistant_events[0]["redacted"] is True
 
 
+def test_telemetry_contract_exposes_ttft_error_type_retry_and_cost_unknown():
+    """Dashboard telemetry reports explicit unknowns instead of guessing spend."""
+    request_id = telemetry.record_request_start(
+        provider="codex",
+        model="cp-gpt55-xhigh",
+        operation="codex-request",
+        correlation_id="trace-123",
+        tier="fast",
+        plan="pro",
+    )
+    telemetry.record_upstream_response(
+        request_id,
+        status_code=429,
+        headers={"retry-after": "3"},
+    )
+    telemetry.record_stream_delta(request_id, text="hello")
+    telemetry.record_usage(
+        request_id,
+        provider="codex",
+        model="cp-gpt55-xhigh",
+        usage={
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            "input_tokens_details": {"cached_tokens": 4},
+            "output_tokens_details": {"reasoning_tokens": 2},
+        },
+    )
+    telemetry.record_request_end(
+        request_id,
+        status_code=429,
+        error="rate limit exceeded",
+    )
+
+    snapshot = telemetry.snapshot()
+    record = snapshot["recent_requests"][0]
+    point = snapshot["timeseries"][0]
+
+    assert "stream.first_delta" in snapshot["events"]["lifecycle"]
+    assert record["correlation_id"] == "trace-123"
+    assert record["tier"] == "fast"
+    assert record["plan"] == "pro"
+    assert record["ttft_ms"] is not None
+    assert record["stream"]["ttft_ms"] == record["ttft_ms"]
+    assert record["stream"]["text_chunks"] == 1
+    assert record["error_type"] == "rate_limit"
+    assert record["retryable"] is True
+    assert record["pricing_known"] is False
+    assert record["estimated_cost_usd"] is None
+    assert record["cost"] == {
+        "estimated_usd": None,
+        "pricing_known": False,
+        "source": None,
+    }
+    assert record["usage"]["reasoning_tokens"] == 2
+    assert point["ttft_ms"] == record["ttft_ms"]
+    assert point["error_type"] == "rate_limit"
+    assert point["status_code"] == 429
+    assert point["reasoning_tokens"] == 2
+    assert point["cost"]["pricing_known"] is False
+    assert snapshot["totals"]["cost"]["pricing_known"] is False
+
+
 def test_ops_review_reports_no_traffic_without_crashing():
     """The ops review gives a useful empty-state instead of pretending."""
     review = build_ops_review(telemetry.snapshot())
@@ -402,6 +465,10 @@ def test_dashboard_routes_render_shell_and_snapshot_payload():
     assert 'id="route-matrix"' in html
     assert 'id="window-select"' in html
     assert 'id="group-select"' in html
+    assert '<option value="1800">30 minutes</option>' in html
+    assert '<option value="7776000">3 months</option>' in html
+    assert '<option value="none">None</option>' in html
+    assert '<option value="status">Status</option>' in html
     assert 'id="provider-posture"' in html
     assert 'id="posture-window"' in html
     assert 'id="provider-runway"' in html
